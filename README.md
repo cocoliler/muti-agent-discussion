@@ -16,9 +16,21 @@
 
 首版以 JSON 导出和 FlowStudio 现有导入入口验收。后续可通过规格版本 API 创建正式 `SpecRevision`，交给 FlowStudio 的 PM Agent 继续任务规划和编排。 [规格 Schema](tech/artifacts/schema/design-spec.schema.json) · [交接设计](FLOWSTUDIO_DESIGN_INPUT.md#62-本地导入与-api-交接)
 
-## 当前进度
+## 运行本地原型
 
-当前提交交付设计文档与兼容契约。可运行工作台尚待实现。目标环境为 Windows 本地浏览器，计划采用 React、FastAPI 和 SQLite。
+需要 Python 3.11+ 和 Node.js 22.12+。在仓库根目录打开 PowerShell，执行以下命令。
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r backend/requirements.txt
+npm.cmd --prefix frontend ci
+npm.cmd --prefix frontend run build
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+打开 [本地工作台](http://127.0.0.1:8000/)，点击「启动会议室演示」，随后按底部按钮逐阶段推进。评审退回后，查看草稿 v2 与 v1 的验收条件差异，确认签收并下载 JSON。会话保存在 `backend/.data/discussions.sqlite3`，同一浏览器刷新可继续演示。
+
+原型采用 React、FastAPI 和 SQLite，内置会议室预约的固定模拟剧本，无需模型密钥。当前支持会话恢复、消息引用、草稿版本、评审退回和签收导出。自由输入、真实模型和 API 直接交接属于后续阶段。
 
 | 阶段 | 验收内容 |
 | --- | --- |

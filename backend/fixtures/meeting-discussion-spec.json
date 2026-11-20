@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "product_name": "内部会议室预约",
+  "background": "员工需要提前预约共享会议室，管理员需要管理可预约时段。",
+  "goals": [
+    "让员工查询空闲时段并完成预约，防止双重占用"
+  ],
+  "target_users": [
+    "员工",
+    "会议室管理员"
+  ],
+  "requirements": [
+    {
+      "id": "FR-01",
+      "kind": "functional",
+      "priority": "must",
+      "text": "员工可查看会议室的可预约时段并发起预约。",
+      "acceptance_criteria": [
+        "选择会议室和时间段后，可用时段能成功预约并返回确认记录。"
+      ]
+    },
+    {
+      "id": "FR-02",
+      "kind": "functional",
+      "priority": "must",
+      "text": "同一会议室的有效预约时段不得重叠。",
+      "acceptance_criteria": [
+        "两人同时请求同一房间的重叠时段时，只生成一个有效预约，另一人收到冲突提示。"
+      ]
+    }
+  ],
+  "technical_constraints": [],
+  "development_constraints": [
+    "首版面向单个办公地点"
+  ],
+  "delivery_requirements": [
+    "交付预约界面、预约服务和时段冲突测试"
+  ],
+  "acceptance_criteria": [
+    "能复现查询、预约及并发预约冲突场景"
+  ],
+  "supplemental_text": "演示用规格。FR-01 对应员工预约场景，FR-02 对应评审提出的重复预约风险。",
+  "confirmed_assumptions": []
+}
