@@ -1,0 +1,193 @@
+{
+  "$defs": {
+    "Requirement": {
+      "additionalProperties": false,
+      "description": "单条需求；同一 SpecRevision 内 id 唯一，正文可改而 id 不变。",
+      "properties": {
+        "acceptance_criteria": {
+          "items": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Acceptance Criteria",
+          "type": "array"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RequirementKind"
+        },
+        "priority": {
+          "$ref": "#/$defs/RequirementPriority"
+        },
+        "text": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "text",
+        "priority",
+        "acceptance_criteria"
+      ],
+      "title": "Requirement",
+      "type": "object"
+    },
+    "RequirementKind": {
+      "enum": [
+        "functional",
+        "nonfunctional"
+      ],
+      "title": "RequirementKind",
+      "type": "string"
+    },
+    "RequirementPriority": {
+      "enum": [
+        "must",
+        "should",
+        "could"
+      ],
+      "title": "RequirementPriority",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "规格内容（不可变 SpecRevision.content）。字段均必填，空数组也需显式给出。",
+  "properties": {
+    "acceptance_criteria": {
+      "items": {
+        "maxLength": 120,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 30,
+      "minItems": 1,
+      "title": "Acceptance Criteria",
+      "type": "array"
+    },
+    "background": {
+      "maxLength": 4000,
+      "minLength": 1,
+      "title": "Background",
+      "type": "string"
+    },
+    "confirmed_assumptions": {
+      "items": {
+        "maxLength": 120,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 30,
+      "title": "Confirmed Assumptions",
+      "type": "array"
+    },
+    "delivery_requirements": {
+      "items": {
+        "maxLength": 120,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 30,
+      "minItems": 1,
+      "title": "Delivery Requirements",
+      "type": "array"
+    },
+    "development_constraints": {
+      "items": {
+        "maxLength": 120,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 30,
+      "title": "Development Constraints",
+      "type": "array"
+    },
+    "goals": {
+      "items": {
+        "maxLength": 120,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "title": "Goals",
+      "type": "array"
+    },
+    "product_name": {
+      "maxLength": 120,
+      "minLength": 1,
+      "title": "Product Name",
+      "type": "string"
+    },
+    "requirements": {
+      "items": {
+        "$ref": "#/$defs/Requirement"
+      },
+      "maxItems": 200,
+      "minItems": 1,
+      "title": "Requirements",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "supplemental_text": {
+      "maxLength": 12000,
+      "minLength": 0,
+      "title": "Supplemental Text",
+      "type": "string"
+    },
+    "target_users": {
+      "items": {
+        "maxLength": 120,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "title": "Target Users",
+      "type": "array"
+    },
+    "technical_constraints": {
+      "items": {
+        "maxLength": 120,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 30,
+      "title": "Technical Constraints",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "product_name",
+    "background",
+    "goals",
+    "target_users",
+    "requirements",
+    "technical_constraints",
+    "development_constraints",
+    "delivery_requirements",
+    "acceptance_criteria",
+    "supplemental_text",
+    "confirmed_assumptions"
+  ],
+  "title": "DesignSpecContent",
+  "type": "object"
+}

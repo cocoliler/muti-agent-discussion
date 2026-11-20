@@ -1,0 +1,3387 @@
+{
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "additionalProperties": false,
+        "description": "错误体：issues 复用 ValidationReport 的缺陷定位结构。",
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/Issue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "issues",
+          "request_id"
+        ],
+        "title": "ApiError",
+        "type": "object"
+      },
+      "AssumptionImpact": {
+        "enum": [
+          "low",
+          "critical"
+        ],
+        "title": "AssumptionImpact",
+        "type": "string"
+      },
+      "CanvasNote": {
+        "additionalProperties": false,
+        "description": "画布注释：只参与显示，不参与业务顺序与覆盖率。",
+        "properties": {
+          "color": {
+            "anyOf": [
+              {
+                "pattern": "^#[0-9a-fA-F]{6}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Color"
+          },
+          "id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 2000,
+            "minLength": 0,
+            "title": "Text",
+            "type": "string"
+          },
+          "x": {
+            "title": "X",
+            "type": "number"
+          },
+          "y": {
+            "title": "Y",
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "x",
+          "y"
+        ],
+        "title": "CanvasNote",
+        "type": "object"
+      },
+      "Coverage": {
+        "additionalProperties": false,
+        "properties": {
+          "covered_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Covered Ids",
+            "type": "array"
+          },
+          "uncovered_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Uncovered Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "covered_ids",
+          "uncovered_ids"
+        ],
+        "title": "Coverage",
+        "type": "object"
+      },
+      "CreatePlanningRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/PlanningConfig"
+          },
+          "fixture_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fixture Id"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/PlanningMode"
+          },
+          "spec_revision_id": {
+            "format": "uuid",
+            "title": "Spec Revision Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "spec_revision_id",
+          "mode",
+          "config"
+        ],
+        "title": "CreatePlanningRunRequest",
+        "type": "object"
+      },
+      "CreateProjectRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateProjectRequest",
+        "type": "object"
+      },
+      "Deliverable": {
+        "additionalProperties": false,
+        "description": "任务产出的可引用成果；id 在其所属任务内唯一。",
+        "properties": {
+          "id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text"
+        ],
+        "title": "Deliverable",
+        "type": "object"
+      },
+      "DesignSpecContent": {
+        "additionalProperties": false,
+        "description": "规格内容（不可变 SpecRevision.content）。字段均必填，空数组也需显式给出。",
+        "properties": {
+          "acceptance_criteria": {
+            "items": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "minItems": 1,
+            "title": "Acceptance Criteria",
+            "type": "array"
+          },
+          "background": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Background",
+            "type": "string"
+          },
+          "confirmed_assumptions": {
+            "items": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Confirmed Assumptions",
+            "type": "array"
+          },
+          "delivery_requirements": {
+            "items": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "minItems": 1,
+            "title": "Delivery Requirements",
+            "type": "array"
+          },
+          "development_constraints": {
+            "items": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Development Constraints",
+            "type": "array"
+          },
+          "goals": {
+            "items": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Goals",
+            "type": "array"
+          },
+          "product_name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Product Name",
+            "type": "string"
+          },
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/Requirement"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Requirements",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "1.0",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "supplemental_text": {
+            "maxLength": 12000,
+            "minLength": 0,
+            "title": "Supplemental Text",
+            "type": "string"
+          },
+          "target_users": {
+            "items": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Target Users",
+            "type": "array"
+          },
+          "technical_constraints": {
+            "items": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Technical Constraints",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "product_name",
+          "background",
+          "goals",
+          "target_users",
+          "requirements",
+          "technical_constraints",
+          "development_constraints",
+          "delivery_requirements",
+          "acceptance_criteria",
+          "supplemental_text",
+          "confirmed_assumptions"
+        ],
+        "title": "DesignSpecContent",
+        "type": "object"
+      },
+      "ErrorCode": {
+        "description": "错误响应体 {error:{code,...}} 的 code。",
+        "enum": [
+          "VALIDATION_FAILED",
+          "NOT_FOUND",
+          "REVISION_CONFLICT",
+          "IDEMPOTENCY_CONFLICT",
+          "PAYLOAD_TOO_LARGE",
+          "QUEUE_FULL",
+          "STORAGE_BUSY",
+          "RESULT_NOT_READY",
+          "ORIGIN_FORBIDDEN"
+        ],
+        "title": "ErrorCode",
+        "type": "string"
+      },
+      "ErrorEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ApiError"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorEnvelope",
+        "type": "object"
+      },
+      "EstimatedEffort": {
+        "additionalProperties": false,
+        "description": "工时只能是估算：is_estimate 恒为 true，不表示真实排期承诺。",
+        "properties": {
+          "basis": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Basis",
+            "type": "string"
+          },
+          "is_estimate": {
+            "const": true,
+            "title": "Is Estimate",
+            "type": "boolean"
+          },
+          "max_hours": {
+            "exclusiveMinimum": 0,
+            "title": "Max Hours",
+            "type": "number"
+          },
+          "min_hours": {
+            "exclusiveMinimum": 0,
+            "title": "Min Hours",
+            "type": "number"
+          }
+        },
+        "required": [
+          "min_hours",
+          "max_hours",
+          "basis",
+          "is_estimate"
+        ],
+        "title": "EstimatedEffort",
+        "type": "object"
+      },
+      "ExecutionStage": {
+        "additionalProperties": false,
+        "description": "业务阶段分组：来自任务的 stage 标签，不隐式产生依赖。",
+        "properties": {
+          "stage_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Stage Id",
+            "type": "string"
+          },
+          "task_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Task Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "stage_id",
+          "task_ids"
+        ],
+        "title": "ExecutionStage",
+        "type": "object"
+      },
+      "ExportBundle": {
+        "additionalProperties": false,
+        "description": "导出包：附带规格与规划约束快照，便于离线解释计划来源。",
+        "properties": {
+          "layout": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Layout"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan_revision": {
+            "$ref": "#/components/schemas/PlanRevision"
+          },
+          "policy_snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanningPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "const": "1.0",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "spec_snapshot": {
+            "$ref": "#/components/schemas/DesignSpecContent"
+          }
+        },
+        "required": [
+          "schema_version",
+          "spec_snapshot",
+          "policy_snapshot",
+          "plan_revision",
+          "layout"
+        ],
+        "title": "ExportBundle",
+        "type": "object"
+      },
+      "Granularity": {
+        "enum": [
+          "coarse",
+          "standard",
+          "fine"
+        ],
+        "title": "Granularity",
+        "type": "string"
+      },
+      "Issue": {
+        "additionalProperties": false,
+        "description": "单条缺陷；path 为 JSON Pointer，例如 /tasks/2/dependencies/0。",
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/IssueCode"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/TaskEdge"
+            },
+            "maxItems": 200,
+            "title": "Edges",
+            "type": "array"
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 200,
+            "pattern": "^(/[^/]*)*$",
+            "title": "Path",
+            "type": "string"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/IssueSeverity"
+          },
+          "suggestion": {
+            "maxLength": 2000,
+            "minLength": 0,
+            "title": "Suggestion",
+            "type": "string"
+          },
+          "task_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Task Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "path",
+          "message",
+          "task_ids",
+          "edges",
+          "suggestion"
+        ],
+        "title": "Issue",
+        "type": "object"
+      },
+      "IssueCode": {
+        "description": "ValidationReport.errors/warnings 的 code。",
+        "enum": [
+          "SPEC_REQUIRED",
+          "DUPLICATE_ID",
+          "MISSING_DEPENDENCY",
+          "SELF_DEPENDENCY",
+          "DUPLICATE_DEPENDENCY",
+          "CYCLE",
+          "INVALID_STAGE",
+          "INVALID_ROLE",
+          "INVALID_CATEGORY",
+          "STAGE_EDGE_FORBIDDEN",
+          "MISSING_INPUT",
+          "INPUT_NOT_DEPENDENCY",
+          "UNKNOWN_REQUIREMENT",
+          "REQUIRED_UNCOVERED",
+          "REQUIRED_CATEGORY",
+          "UNCONFIRMED_ASSUMPTION",
+          "CRITICAL_ASSUMPTION",
+          "POSSIBLE_DUPLICATE",
+          "ORPHAN",
+          "POLICY_UNSATISFIABLE",
+          "SOURCE_MISMATCH"
+        ],
+        "title": "IssueCode",
+        "type": "string"
+      },
+      "IssueSeverity": {
+        "enum": [
+          "error",
+          "warning"
+        ],
+        "title": "IssueSeverity",
+        "type": "string"
+      },
+      "Layout": {
+        "additionalProperties": false,
+        "description": "独立可更新的画布布局；不改变计划 hash。",
+        "properties": {
+          "notes": {
+            "items": {
+              "$ref": "#/components/schemas/CanvasNote"
+            },
+            "maxItems": 200,
+            "title": "Notes",
+            "type": "array"
+          },
+          "plan_revision_id": {
+            "format": "uuid",
+            "title": "Plan Revision Id",
+            "type": "string"
+          },
+          "positions": {
+            "patternProperties": {
+              "^[A-Za-z][A-Za-z0-9_-]*$": {
+                "$ref": "#/components/schemas/Position"
+              }
+            },
+            "propertyNames": {
+              "maxLength": 64,
+              "minLength": 1
+            },
+            "title": "Positions",
+            "type": "object"
+          },
+          "revision": {
+            "minimum": 0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "viewport": {
+            "$ref": "#/components/schemas/Viewport"
+          }
+        },
+        "required": [
+          "plan_revision_id",
+          "revision",
+          "positions",
+          "notes",
+          "viewport"
+        ],
+        "title": "Layout",
+        "type": "object"
+      },
+      "LayoutWriteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "minimum": 0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "notes": {
+            "items": {
+              "$ref": "#/components/schemas/CanvasNote"
+            },
+            "maxItems": 200,
+            "title": "Notes",
+            "type": "array"
+          },
+          "positions": {
+            "patternProperties": {
+              "^[A-Za-z][A-Za-z0-9_-]*$": {
+                "$ref": "#/components/schemas/Position"
+              }
+            },
+            "propertyNames": {
+              "maxLength": 64,
+              "minLength": 1
+            },
+            "title": "Positions",
+            "type": "object"
+          },
+          "viewport": {
+            "$ref": "#/components/schemas/Viewport"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "positions",
+          "notes",
+          "viewport"
+        ],
+        "title": "LayoutWriteRequest",
+        "type": "object"
+      },
+      "OrchestrationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanningPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "spec_revision_id": {
+            "format": "uuid",
+            "title": "Spec Revision Id",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            },
+            "minItems": 1,
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "spec_revision_id",
+          "tasks"
+        ],
+        "title": "OrchestrationRequest",
+        "type": "object"
+      },
+      "OriginMode": {
+        "enum": [
+          "REAL",
+          "TEST",
+          "NONE"
+        ],
+        "title": "OriginMode",
+        "type": "string"
+      },
+      "PlanDerivation": {
+        "additionalProperties": false,
+        "description": "编排器纯函数输出；客户端投影只消费这些派生字段。",
+        "properties": {
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/TaskEdge"
+            },
+            "maxItems": 1000,
+            "title": "Edges",
+            "type": "array"
+          },
+          "execution_stages": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionStage"
+            },
+            "maxItems": 100,
+            "title": "Execution Stages",
+            "type": "array"
+          },
+          "input_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Input Hash",
+            "type": "string"
+          },
+          "ordered_task_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Ordered Task Ids",
+            "type": "array"
+          },
+          "parallel_batches": {
+            "items": {
+              "items": {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "maxItems": 100,
+            "title": "Parallel Batches",
+            "type": "array"
+          },
+          "validation_report": {
+            "$ref": "#/components/schemas/ValidationReport"
+          }
+        },
+        "required": [
+          "input_hash",
+          "edges",
+          "execution_stages",
+          "parallel_batches",
+          "ordered_task_ids",
+          "validation_report"
+        ],
+        "title": "PlanDerivation",
+        "type": "object"
+      },
+      "PlanRevision": {
+        "additionalProperties": false,
+        "description": "不可变计划版本；冻结假设确认与来源，派生字段由服务端重算。",
+        "properties": {
+          "confirmed_assumption_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Confirmed Assumption Ids",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/TaskEdge"
+            },
+            "maxItems": 1000,
+            "title": "Edges",
+            "type": "array"
+          },
+          "execution_stages": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionStage"
+            },
+            "maxItems": 100,
+            "title": "Execution Stages",
+            "type": "array"
+          },
+          "hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Hash",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "ordered_task_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Ordered Task Ids",
+            "type": "array"
+          },
+          "origin_mode": {
+            "$ref": "#/components/schemas/OriginMode"
+          },
+          "parallel_batches": {
+            "items": {
+              "items": {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "maxItems": 100,
+            "title": "Parallel Batches",
+            "type": "array"
+          },
+          "parent_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Revision Id"
+          },
+          "plan_id": {
+            "format": "uuid",
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "planning_run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planning Run Id"
+          },
+          "policy_snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanningPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "minimum": 1,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/PlanSource"
+          },
+          "spec_revision_id": {
+            "format": "uuid",
+            "title": "Spec Revision Id",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Tasks",
+            "type": "array"
+          },
+          "validation_report": {
+            "$ref": "#/components/schemas/ValidationReport"
+          }
+        },
+        "required": [
+          "id",
+          "plan_id",
+          "revision",
+          "spec_revision_id",
+          "planning_run_id",
+          "parent_revision_id",
+          "policy_snapshot",
+          "source",
+          "origin_mode",
+          "confirmed_assumption_ids",
+          "tasks",
+          "edges",
+          "execution_stages",
+          "parallel_batches",
+          "ordered_task_ids",
+          "validation_report",
+          "hash",
+          "created_at"
+        ],
+        "title": "PlanRevision",
+        "type": "object"
+      },
+      "PlanRevisionSummary": {
+        "additionalProperties": false,
+        "description": "历史列表项：不含任务正文，只给出可导航的版本信息。",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Hash",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "origin_mode": {
+            "$ref": "#/components/schemas/OriginMode"
+          },
+          "plan_id": {
+            "format": "uuid",
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "source": {
+            "$ref": "#/components/schemas/PlanSource"
+          },
+          "spec_revision_id": {
+            "format": "uuid",
+            "title": "Spec Revision Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "plan_id",
+          "revision",
+          "spec_revision_id",
+          "source",
+          "origin_mode",
+          "hash",
+          "created_at"
+        ],
+        "title": "PlanRevisionSummary",
+        "type": "object"
+      },
+      "PlanRevisionSummaryPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PlanRevisionSummary"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "PlanRevisionSummaryPage",
+        "type": "object"
+      },
+      "PlanSource": {
+        "enum": [
+          "AI",
+          "TEST",
+          "MANUAL"
+        ],
+        "title": "PlanSource",
+        "type": "string"
+      },
+      "PlanningConfig": {
+        "additionalProperties": false,
+        "description": "请求侧规划参数；服务端解析模型别名后写入快照。",
+        "properties": {
+          "granularity": {
+            "$ref": "#/components/schemas/Granularity"
+          },
+          "model": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "planning_constraints": {
+            "items": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Planning Constraints",
+            "type": "array"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanningPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "model",
+          "granularity",
+          "planning_constraints"
+        ],
+        "title": "PlanningConfig",
+        "type": "object"
+      },
+      "PlanningMode": {
+        "enum": [
+          "REAL",
+          "TEST"
+        ],
+        "title": "PlanningMode",
+        "type": "string"
+      },
+      "PlanningPolicy": {
+        "additionalProperties": false,
+        "description": "可选过程约束；null 表示不额外限制，缺省即通用规则。",
+        "properties": {
+          "allowed_categories": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Categories"
+          },
+          "allowed_roles": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Roles"
+          },
+          "allowed_stage_edges": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/StageEdge"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Stage Edges"
+          },
+          "allowed_stages": {
+            "anyOf": [
+              {
+                "items": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Stages"
+          },
+          "required_categories": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "title": "Required Categories",
+            "type": "array"
+          },
+          "rules_version": {
+            "const": "1.0",
+            "title": "Rules Version",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "1.0",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "rules_version",
+          "allowed_stages",
+          "allowed_roles",
+          "allowed_categories",
+          "allowed_stage_edges",
+          "required_categories"
+        ],
+        "title": "PlanningPolicy",
+        "type": "object"
+      },
+      "PlanningRun": {
+        "additionalProperties": false,
+        "description": "单次规划请求。SUCCEEDED 只表示候选通过结构/图校验，不代表已保存或已执行。",
+        "properties": {
+          "attempt_count": {
+            "maximum": 3,
+            "minimum": 0,
+            "title": "Attempt Count",
+            "type": "integer"
+          },
+          "config_snapshot": {
+            "$ref": "#/components/schemas/PlanningConfig"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Finished At"
+          },
+          "fixture_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fixture Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/PlanningMode"
+          },
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskProposal"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "spec_revision_id": {
+            "format": "uuid",
+            "title": "Spec Revision Id",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Started At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PlanningStatus"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TokenUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "validation_report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ValidationReport"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "id",
+          "spec_revision_id",
+          "mode",
+          "status",
+          "config_snapshot",
+          "attempt_count",
+          "created_at"
+        ],
+        "title": "PlanningRun",
+        "type": "object"
+      },
+      "PlanningRunCreated": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "poll_url": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Poll Url",
+            "type": "string"
+          },
+          "status": {
+            "const": "QUEUED",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "poll_url"
+        ],
+        "title": "PlanningRunCreated",
+        "type": "object"
+      },
+      "PlanningRunTasksResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            },
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tasks"
+        ],
+        "title": "PlanningRunTasksResponse",
+        "type": "object"
+      },
+      "PlanningStatus": {
+        "enum": [
+          "QUEUED",
+          "RUNNING",
+          "SUCCEEDED",
+          "NEEDS_INPUT",
+          "FAILED"
+        ],
+        "title": "PlanningStatus",
+        "type": "string"
+      },
+      "Position": {
+        "additionalProperties": false,
+        "properties": {
+          "x": {
+            "title": "X",
+            "type": "number"
+          },
+          "y": {
+            "title": "Y",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "title": "Position",
+        "type": "object"
+      },
+      "Project": {
+        "additionalProperties": false,
+        "properties": {
+          "archived_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archived At"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "archived_at",
+          "created_at"
+        ],
+        "title": "Project",
+        "type": "object"
+      },
+      "ProjectPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Project"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "ProjectPage",
+        "type": "object"
+      },
+      "Requirement": {
+        "additionalProperties": false,
+        "description": "单条需求；同一 SpecRevision 内 id 唯一，正文可改而 id 不变。",
+        "properties": {
+          "acceptance_criteria": {
+            "items": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Acceptance Criteria",
+            "type": "array"
+          },
+          "id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RequirementKind"
+          },
+          "priority": {
+            "$ref": "#/components/schemas/RequirementPriority"
+          },
+          "text": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "text",
+          "priority",
+          "acceptance_criteria"
+        ],
+        "title": "Requirement",
+        "type": "object"
+      },
+      "RequirementKind": {
+        "enum": [
+          "functional",
+          "nonfunctional"
+        ],
+        "title": "RequirementKind",
+        "type": "string"
+      },
+      "RequirementPriority": {
+        "enum": [
+          "must",
+          "should",
+          "could"
+        ],
+        "title": "RequirementPriority",
+        "type": "string"
+      },
+      "RunError": {
+        "additionalProperties": false,
+        "description": "规划失败诊断；retryable 必须与失败码的可重试集合一致。",
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/RunFailureCode"
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "provider_request_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Provider Request Id"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "title": "RunError",
+        "type": "object"
+      },
+      "RunFailureCode": {
+        "description": "PlanningRun.error.code 的取值；不含图校验缺陷（那属于 ValidationReport）。",
+        "enum": [
+          "MODEL_SCHEMA",
+          "MODEL_EMPTY",
+          "MODEL_TRUNCATED",
+          "MODEL_BUDGET",
+          "MODEL_TIMEOUT",
+          "MODEL_AUTH",
+          "MODEL_RATE_LIMITED",
+          "MODEL_NETWORK",
+          "PROCESS_INTERRUPTED",
+          "POLICY_UNSATISFIABLE",
+          "INTERNAL_ERROR"
+        ],
+        "title": "RunFailureCode",
+        "type": "string"
+      },
+      "SavePlanRequest": {
+        "additionalProperties": false,
+        "description": "保存计划只提交任务与来源；派生字段与 source 由服务端推导。",
+        "properties": {
+          "confirmed_assumption_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "title": "Confirmed Assumption Ids",
+            "type": "array"
+          },
+          "layout": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Layout"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "planning_run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Planning Run Id"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanningPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "spec_revision_id": {
+            "format": "uuid",
+            "title": "Spec Revision Id",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            },
+            "minItems": 1,
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "spec_revision_id",
+          "tasks",
+          "confirmed_assumption_ids"
+        ],
+        "title": "SavePlanRequest",
+        "type": "object"
+      },
+      "SavePlanResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "plan_id": {
+            "format": "uuid",
+            "title": "Plan Id",
+            "type": "string"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/PlanRevision"
+          }
+        },
+        "required": [
+          "plan_id",
+          "revision"
+        ],
+        "title": "SavePlanResponse",
+        "type": "object"
+      },
+      "SavePlanRevisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed_assumption_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "title": "Confirmed Assumption Ids",
+            "type": "array"
+          },
+          "expected_revision": {
+            "minimum": 1,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "layout": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Layout"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "parent_revision_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Parent Revision Id"
+          },
+          "planning_run_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Planning Run Id"
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanningPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "spec_revision_id": {
+            "format": "uuid",
+            "title": "Spec Revision Id",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            },
+            "minItems": 1,
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "spec_revision_id",
+          "tasks",
+          "confirmed_assumption_ids",
+          "expected_revision"
+        ],
+        "title": "SavePlanRevisionRequest",
+        "type": "object"
+      },
+      "SpecInput": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "spec",
+            "title": "Kind",
+            "type": "string"
+          },
+          "requirement_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Requirement Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "requirement_id"
+        ],
+        "title": "SpecInput",
+        "type": "object"
+      },
+      "SpecRevision": {
+        "additionalProperties": false,
+        "description": "不可变规格版本；revision 从 1 递增，hash 为内容规范化 SHA-256。",
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/DesignSpecContent"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Hash",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "spec_id": {
+            "format": "uuid",
+            "title": "Spec Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "spec_id",
+          "revision",
+          "content",
+          "hash",
+          "created_at"
+        ],
+        "title": "SpecRevision",
+        "type": "object"
+      },
+      "SpecRevisionPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SpecRevision"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "SpecRevisionPage",
+        "type": "object"
+      },
+      "SpecRevisionWriteRequest": {
+        "additionalProperties": false,
+        "description": "expected_revision 即 CAS 期望值：初次保存为 0，冲突返回 409。",
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/DesignSpecContent"
+          },
+          "expected_revision": {
+            "minimum": 0,
+            "title": "Expected Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_revision",
+          "content"
+        ],
+        "title": "SpecRevisionWriteRequest",
+        "type": "object"
+      },
+      "SpecValidationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "$ref": "#/components/schemas/DesignSpecContent"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "SpecValidationRequest",
+        "type": "object"
+      },
+      "StageEdge": {
+        "additionalProperties": false,
+        "description": "允许的阶段迁移 from→to；JSON 字段名为 from/to。",
+        "properties": {
+          "from": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "From",
+            "type": "string"
+          },
+          "to": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "title": "StageEdge",
+        "type": "object"
+      },
+      "Task": {
+        "additionalProperties": false,
+        "properties": {
+          "acceptance_criteria": {
+            "items": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "minItems": 1,
+            "title": "Acceptance Criteria",
+            "type": "array"
+          },
+          "assigned_role": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Assigned Role",
+            "type": "string"
+          },
+          "assumptions": {
+            "items": {
+              "$ref": "#/components/schemas/TaskAssumption"
+            },
+            "maxItems": 30,
+            "title": "Assumptions",
+            "type": "array"
+          },
+          "category": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Category",
+            "type": "string"
+          },
+          "deliverables": {
+            "items": {
+              "$ref": "#/components/schemas/Deliverable"
+            },
+            "maxItems": 30,
+            "minItems": 1,
+            "title": "Deliverables",
+            "type": "array"
+          },
+          "dependencies": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 99,
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "estimated_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EstimatedEffort"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "inputs": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "spec": "#/components/schemas/SpecInput",
+                  "task": "#/components/schemas/TaskInput"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SpecInput"
+                },
+                {
+                  "$ref": "#/components/schemas/TaskInput"
+                }
+              ]
+            },
+            "maxItems": 200,
+            "title": "Inputs",
+            "type": "array"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "priority": {
+            "$ref": "#/components/schemas/TaskPriority"
+          },
+          "rationale": {
+            "maxLength": 2000,
+            "minLength": 0,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "source_requirement_ids": {
+            "items": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 200,
+            "title": "Source Requirement Ids",
+            "type": "array"
+          },
+          "stage": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Stage",
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "name",
+          "description",
+          "category",
+          "stage",
+          "priority",
+          "assigned_role",
+          "dependencies",
+          "inputs",
+          "deliverables",
+          "acceptance_criteria",
+          "source_requirement_ids",
+          "rationale",
+          "assumptions",
+          "estimated_effort"
+        ],
+        "title": "Task",
+        "type": "object"
+      },
+      "TaskAssumption": {
+        "additionalProperties": false,
+        "description": "非关键假设随候选显示；critical 假设必须回到补规格流程。",
+        "properties": {
+          "id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "impact": {
+            "$ref": "#/components/schemas/AssumptionImpact"
+          },
+          "text": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "impact"
+        ],
+        "title": "TaskAssumption",
+        "type": "object"
+      },
+      "TaskEdge": {
+        "additionalProperties": false,
+        "description": "依赖边 source→target，表示 target 必须等待 source。",
+        "properties": {
+          "source": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Source",
+            "type": "string"
+          },
+          "target": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "target"
+        ],
+        "title": "TaskEdge",
+        "type": "object"
+      },
+      "TaskInput": {
+        "additionalProperties": false,
+        "properties": {
+          "deliverable_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Deliverable Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "task",
+            "title": "Kind",
+            "type": "string"
+          },
+          "task_id": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "task_id",
+          "deliverable_id"
+        ],
+        "title": "TaskInput",
+        "type": "object"
+      },
+      "TaskPriority": {
+        "enum": [
+          "high",
+          "medium",
+          "low"
+        ],
+        "title": "TaskPriority",
+        "type": "string"
+      },
+      "TaskProposal": {
+        "additionalProperties": false,
+        "description": "一次规划的候选任务集；tasks 为空必须伴随 blocking_questions。",
+        "properties": {
+          "blocking_questions": {
+            "items": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Blocking Questions",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "1.0",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            },
+            "maxItems": 100,
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "tasks",
+          "blocking_questions"
+        ],
+        "title": "TaskProposal",
+        "type": "object"
+      },
+      "TokenUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "completion_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Completion Tokens"
+          },
+          "prompt_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Prompt Tokens"
+          },
+          "total_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Total Tokens"
+          }
+        },
+        "title": "TokenUsage",
+        "type": "object"
+      },
+      "ValidationReport": {
+        "additionalProperties": false,
+        "properties": {
+          "coverage": {
+            "$ref": "#/components/schemas/Coverage"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/Issue"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "input_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Input Hash",
+            "type": "string"
+          },
+          "rules_version": {
+            "const": "1.0",
+            "title": "Rules Version",
+            "type": "string"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/Issue"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "valid",
+          "errors",
+          "warnings",
+          "coverage",
+          "rules_version",
+          "input_hash"
+        ],
+        "title": "ValidationReport",
+        "type": "object"
+      },
+      "Viewport": {
+        "additionalProperties": false,
+        "properties": {
+          "x": {
+            "title": "X",
+            "type": "number"
+          },
+          "y": {
+            "title": "Y",
+            "type": "number"
+          },
+          "zoom": {
+            "exclusiveMinimum": 0,
+            "title": "Zoom",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "zoom"
+        ],
+        "title": "Viewport",
+        "type": "object"
+      },
+      "WorkflowValidationRequest": {
+        "additionalProperties": false,
+        "description": "与编排请求同形状：复用同一 build，不复制规则。",
+        "properties": {
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanningPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "spec_revision_id": {
+            "format": "uuid",
+            "title": "Spec Revision Id",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/Task"
+            },
+            "minItems": 1,
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "spec_revision_id",
+          "tasks"
+        ],
+        "title": "WorkflowValidationRequest",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "通用设计规格 → PM Agent 任务分解 → 确定性编排 → 可视化 的规划闭环接口契约。写入拒绝未知字段；坐标与注释不参与业务顺序；PlanningRun 与未来执行 Run 不合并。",
+    "title": "FlowStudio Planning API",
+    "version": "1.0",
+    "x-rules-version": "1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/orchestrations": {
+      "post": {
+        "operationId": "orchestratePlan",
+        "parameters": [
+          {
+            "description": "写命令幂等键（UUID 字符串）；同键异内容返回 409",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OrchestrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanDerivation"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "NOT_FOUND"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "VALIDATION_FAILED"
+          }
+        },
+        "summary": "确定性拓扑分层与并行批次",
+        "tags": [
+          "orchestration"
+        ]
+      }
+    },
+    "/api/v1/plan-revisions/{revision_id}": {
+      "get": {
+        "operationId": "getPlanRevision",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanRevision"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "NOT_FOUND"
+          }
+        },
+        "summary": "读取计划版本全文",
+        "tags": [
+          "plans"
+        ]
+      }
+    },
+    "/api/v1/plan-revisions/{revision_id}/export": {
+      "get": {
+        "operationId": "exportPlanRevision",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "导出格式，当前仅 json",
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportBundle"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "NOT_FOUND"
+          }
+        },
+        "summary": "导出计划包与快照",
+        "tags": [
+          "plans"
+        ]
+      }
+    },
+    "/api/v1/plan-revisions/{revision_id}/layout": {
+      "get": {
+        "operationId": "getLayout",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Layout"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "NOT_FOUND"
+          }
+        },
+        "summary": "读取画布布局",
+        "tags": [
+          "layout"
+        ]
+      },
+      "put": {
+        "operationId": "putLayout",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "写命令幂等键（UUID 字符串）；同键异内容返回 409",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LayoutWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Layout"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "REVISION_CONFLICT"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "VALIDATION_FAILED"
+          }
+        },
+        "summary": "独立更新画布布局",
+        "tags": [
+          "layout"
+        ]
+      }
+    },
+    "/api/v1/planning-runs": {
+      "post": {
+        "operationId": "createPlanningRun",
+        "parameters": [
+          {
+            "description": "写命令幂等键（UUID 字符串）；同键异内容返回 409",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePlanningRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanningRunCreated"
+                }
+              }
+            },
+            "description": "202 成功"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "VALIDATION_FAILED"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "QUEUE_FULL"
+          }
+        },
+        "summary": "入队一次规划请求",
+        "tags": [
+          "planning"
+        ]
+      }
+    },
+    "/api/v1/planning-runs/{run_id}": {
+      "get": {
+        "operationId": "getPlanningRun",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanningRun"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "NOT_FOUND"
+          }
+        },
+        "summary": "查询规划运行与诊断",
+        "tags": [
+          "planning"
+        ]
+      }
+    },
+    "/api/v1/planning-runs/{run_id}/tasks": {
+      "get": {
+        "operationId": "getPlanningRunTasks",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanningRunTasksResponse"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "NOT_FOUND"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "RESULT_NOT_READY"
+          }
+        },
+        "summary": "读取已通过校验的候选任务",
+        "tags": [
+          "planning"
+        ]
+      }
+    },
+    "/api/v1/plans/{plan_id}/revisions": {
+      "get": {
+        "operationId": "listPlanRevisions",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "每页数量，默认 20，最大 100",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "不透明分页游标",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanRevisionSummaryPage"
+                }
+              }
+            },
+            "description": "200 成功"
+          }
+        },
+        "summary": "分页读取计划历史",
+        "tags": [
+          "plans"
+        ]
+      },
+      "post": {
+        "operationId": "createPlanRevision",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "写命令幂等键（UUID 字符串）；同键异内容返回 409",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavePlanRevisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlanRevision"
+                }
+              }
+            },
+            "description": "201 成功"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "REVISION_CONFLICT、IDEMPOTENCY_CONFLICT"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "VALIDATION_FAILED"
+          }
+        },
+        "summary": "保存新计划版本（CAS）",
+        "tags": [
+          "plans"
+        ]
+      }
+    },
+    "/api/v1/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "parameters": [
+          {
+            "description": "每页数量，默认 20，最大 100",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "不透明分页游标",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectPage"
+                }
+              }
+            },
+            "description": "200 成功"
+          }
+        },
+        "summary": "分页读取项目",
+        "tags": [
+          "projects"
+        ]
+      },
+      "post": {
+        "operationId": "createProject",
+        "parameters": [
+          {
+            "description": "写命令幂等键（UUID 字符串）；同键异内容返回 409",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            },
+            "description": "201 成功"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "VALIDATION_FAILED"
+          }
+        },
+        "summary": "创建本地项目",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/api/v1/projects/{project_id}/plans": {
+      "post": {
+        "operationId": "createPlan",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "写命令幂等键（UUID 字符串）；同键异内容返回 409",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavePlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavePlanResponse"
+                }
+              }
+            },
+            "description": "201 成功"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "NOT_FOUND"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "VALIDATION_FAILED"
+          }
+        },
+        "summary": "保存首个计划版本",
+        "tags": [
+          "plans"
+        ]
+      }
+    },
+    "/api/v1/projects/{project_id}/spec-revisions": {
+      "get": {
+        "operationId": "listSpecRevisions",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "每页数量，默认 20，最大 100",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "不透明分页游标",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecRevisionPage"
+                }
+              }
+            },
+            "description": "200 成功"
+          }
+        },
+        "summary": "分页读取规格版本",
+        "tags": [
+          "specs"
+        ]
+      },
+      "post": {
+        "operationId": "createSpecRevision",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "description": "写命令幂等键（UUID 字符串）；同键异内容返回 409",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpecRevisionWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecRevision"
+                }
+              }
+            },
+            "description": "201 成功"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "REVISION_CONFLICT"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "VALIDATION_FAILED"
+          }
+        },
+        "summary": "保存不可变规格版本",
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/v1/spec-revisions/{revision_id}": {
+      "get": {
+        "operationId": "getSpecRevision",
+        "parameters": [
+          {
+            "description": "UUID",
+            "in": "path",
+            "name": "revision_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpecRevision"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "NOT_FOUND"
+          }
+        },
+        "summary": "读取单个规格版本",
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/v1/spec-validations": {
+      "post": {
+        "operationId": "validateSpec",
+        "parameters": [
+          {
+            "description": "写命令幂等键（UUID 字符串）；同键异内容返回 409",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpecValidationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationReport"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "VALIDATION_FAILED"
+          }
+        },
+        "summary": "结构与确定性问题检查，不调用模型",
+        "tags": [
+          "specs"
+        ]
+      }
+    },
+    "/api/v1/workflow-validations": {
+      "post": {
+        "operationId": "validateWorkflow",
+        "parameters": [
+          {
+            "description": "写命令幂等键（UUID 字符串）；同键异内容返回 409",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowValidationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationReport"
+                }
+              }
+            },
+            "description": "200 成功"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "NOT_FOUND"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            },
+            "description": "VALIDATION_FAILED"
+          }
+        },
+        "summary": "仅返回校验报告",
+        "tags": [
+          "orchestration"
+        ]
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "本地单体，仅监听 loopback",
+      "url": "http://127.0.0.1:8000"
+    }
+  ]
+}
