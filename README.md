@@ -30,13 +30,54 @@ npm.cmd --prefix frontend run build
 
 打开 [本地工作台](http://127.0.0.1:8000/)，点击「启动会议室演示」，随后按底部按钮逐阶段推进。评审退回后，查看草稿 v2 与 v1 的验收条件差异，确认签收并下载 JSON。会话保存在 `backend/.data/discussions.sqlite3`，同一浏览器刷新可继续演示。
 
-原型采用 React、FastAPI 和 SQLite，内置会议室预约的固定模拟剧本，无需模型密钥。当前支持会话恢复、消息引用、草稿版本、评审退回和签收导出。自由输入、真实模型和 API 直接交接属于后续阶段。
+原型采用 React、FastAPI 和 SQLite，内置会议室预约的固定模拟剧本，无需模型密钥。当前支持会话恢复、消息引用、草稿版本、评审退回和签收导出。浏览器演示使用 `/api/demo`；下述角色服务提供独立调用入口，供自由讨论流程接入。
 
 | 阶段 | 验收内容 |
 | --- | --- |
 | 模拟讨论 | 通过会议室预约案例验证角色发言、引用质疑、独立评审退回、定向修订和刷新恢复 |
 | 真实模型 | 验证角色输出校验、人工澄清、调用预算、失败恢复和成本记录 |
 | 规格交接 | 签收当前版本，验证 JSON 导入，再验证 API 幂等写入和版本冲突处理 |
+
+## 成员 2 · 运行与接入讨论角色
+
+安装上面的后端依赖后，可直接运行校园器材借用样例。主持人读取用户原话，返回本轮议题、参与角色和消息引用。第二条命令运行角色回归测试。
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.roles backend/fixtures/role-host-input.json
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+真实模式从服务端环境变量 `DEEPSEEK_API_KEY` 和 `DISCUSSION_MODEL` 读取凭据与模型名。将两个变量配置在当前终端后，执行以下命令。返回的 JSON 包含模式、模型名、任务快照摘要、输出和逐次调用记录。退出码 0 表示成功，1 表示角色执行失败，2 表示输入或配置有误。
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.roles backend/fixtures/role-host-input.json --mode real --timeout 45 --call-limit 2
+```
+
+编排端为每个会话创建一个 `RoleRunner`，在同一个事件循环中复用它。主持人、五个专业角色、质疑者、记录员和独立评审共用以下接口。会话预算按实际尝试扣减，命令行每次启动是独立运行。
+
+```python
+from backend.roles.contracts import RoleRequest
+from backend.roles.runner import RoleRunner
+from backend.roles.simulation import SimulationProvider
+
+async def run_session_tasks(session_id, snapshots):
+    runner = RoleRunner(session_id, SimulationProvider(), mode="simulation", call_limit=32)
+    results = []
+    for snapshot in snapshots:
+        result = await runner.run(RoleRequest.model_validate(snapshot))
+        results.append(result)
+        if result.error:
+            break
+    return results
+```
+
+| 接入方 | 调用约定 |
+| --- | --- |
+| 成员 1 · 编排 | 分配任务 ID、输入版本、可点名角色和本轮可见消息；送审时提供冻结稿及其依据。根据 `result.output` 决定是否推进。相同任务与快照重复派发会返回已有结果；同一 ID 换用新快照返回 `task_snapshot_conflict`。 |
+| 成员 3 · 存储 | 保存任务、快照引用、结果和 `attempts`。每次尝试带序号、耗时、错误类别、诊断及服务端报告的 token 用量。缺失用量记为 `null`。运行器的去重和调用计数仅在当前进程内有效，跨重启的预算与历史由持久化层恢复。 |
+| 成员 5 · 规格交接 | 记录员输出 `content`、按需求 ID 索引的 `source_map` 和需求变更说明；独立评审返回冻结稿 ID、结论与问题处理记录。签收时由上层校验当前版本和用户确认。 |
+
+限流、超时和临时服务故障最多重试一次，每次都受剩余预算约束。格式异常返回 `invalid_output` 和诊断。额度耗尽返回 `call_limit`。编排端得到用户授权后可用 `runner.extend_budget(n)` 追加额度，再次提交同一快照以继续剩余尝试。模拟模式使用确定性示例规则，用量为零。真实服务的用量按每次响应记录。[角色输入输出契约](backend/roles/contracts.py) · [样例输入](backend/fixtures/role-host-input.json)
 
 ## 六人开发分工
 

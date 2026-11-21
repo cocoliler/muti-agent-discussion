@@ -1,0 +1,18 @@
+{
+  "role": "host",
+  "session_id": "campus-equipment",
+  "logical_task_id": "agenda-1",
+  "input_version": 1,
+  "topic_id": "first-release",
+  "round": 1,
+  "user_input": "项目名称：校园器材借用。目标用户：学生、器材管理员。目标：学生查询可借器材并提交借用申请。约束：首版只覆盖一个校区。",
+  "messages": [
+    {
+      "seq": 1,
+      "session_id": "campus-equipment",
+      "input_version": 1,
+      "role": "user",
+      "text": "项目名称：校园器材借用。目标用户：学生、器材管理员。目标：学生查询可借器材并提交借用申请。约束：首版只覆盖一个校区。"
+    }
+  ]
+}
