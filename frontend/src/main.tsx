@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Workbench } from './Workbench';
 import './style.css';
 
 const roles = {
@@ -60,7 +61,7 @@ function Avatar({ role }: { role: Role }) {
   return <span aria-hidden="true" title={name} className="avatar" style={{ color, backgroundColor: color + '22' }}>{initial}</span>;
 }
 
-function App() {
+function Demo({ openWorkbench }: { openWorkbench: () => void }) {
   const [session, setSession] = useState<Session | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
@@ -164,6 +165,7 @@ function App() {
     <header className="topbar">
       <div className="brand"><span className="brand-icon" aria-hidden="true">✳</span><div><strong>Design Room</strong><small>多 Agent 需求工作台</small></div></div>
       <div className="top-actions"><span className="mode"><i />模拟模式</span>
+        <button onClick={openWorkbench}>讨论工作台</button>
         <button disabled={busy} onClick={() => void start()}>{session ? '新建演示' : '启动演示'}</button>
       </div>
     </header>
@@ -238,6 +240,11 @@ function App() {
       </aside>
     </div>
   </div>;
+}
+
+function App() {
+  const [demo, setDemo] = useState(false);
+  return demo ? <Demo openWorkbench={() => setDemo(false)} /> : <Workbench openDemo={() => setDemo(true)} />;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);

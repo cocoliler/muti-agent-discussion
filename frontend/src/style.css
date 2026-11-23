@@ -104,3 +104,38 @@ h1, h2, h3, p { margin: 0; }
   .spec { height: auto; min-height: 0; border-left: 0; border-top: 1px solid var(--border); }
 }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+
+.live-form { display: grid; gap: 10px; }
+.live-form label { display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
+.live-form input:not([type="checkbox"]), .live-form textarea, .live-form select {
+  width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid #383b54;
+  border-radius: 7px; background: #151622; color: #eeeefa; font: inherit;
+}
+.live-form textarea { resize: vertical; }
+.live-form .json-input { font-family: Consolas, monospace; }
+.live-form .check { display: flex; align-items: center; gap: 6px; }
+.live-form > button { justify-self: start; }
+.workbench-controls { display: grid; gap: 10px; padding: 12px clamp(12px, 2vw, 24px); border-top: 1px solid var(--border);
+  background: #191b27; overflow: auto; max-height: 49%; }
+.spec summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+.workbench-controls button { font-size: 13px; }
+.action-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: end; }
+.action-row.spread { justify-content: space-between; align-items: center; }
+.action-row input[type="number"] { width: 78px; }
+.session-status { margin-bottom: 24px; padding: 10px; background: #252138; border-radius: 8px; }
+.session-status p, .roles small { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.budget { margin: 0; font-size: 12px; }
+.budget > div { display: flex; flex-wrap: wrap; gap: 4px 8px; justify-content: space-between; margin-bottom: 8px; }
+.budget dd { margin: 0; color: var(--muted); }
+.workbench-error { display: block; max-height: 18%; overflow: auto; }
+.workbench-error ul { margin-block: 7px; }
+.message-body p { white-space: pre-wrap; }
+.spec-content .versions { flex-wrap: wrap; }
+.draft-context, .handoff, .review-finding { margin-top: 10px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+.handoff a { color: var(--accent); }
+.draft-context pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 810px) {
+  .live-workspace .rail > .session-status { display: block; margin: 0; }
+  .live-workspace .rail > .roles, .live-workspace .rail > .budget { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0 0; }
+  .live-workspace .rail .budget > div { margin: 0 6px 0 0; }
+}

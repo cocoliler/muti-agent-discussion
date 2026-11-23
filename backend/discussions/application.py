@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
-from .codec import encode
+from .codec import CodecError, decode, encode
 from .errors import ApiError, decision_error_code, decision_status
 from .repository import DiscussionRepository, NotFound, VersionConflict, utcnow
 
@@ -333,6 +333,13 @@ class DiscussionService:
 
     def _dispatch(self, session: Any, action: str, payload: dict[str, Any]) -> Any:
         engine = self.engine
+
+        def decode_payload(model: str) -> Any:
+            try:
+                return decode(self.models[model], payload, "payload")
+            except CodecError as exc:
+                raise ApiError("VALIDATION_FAILED", str(exc), status=422) from exc
+
         handler = {
             "pause": lambda: engine.pause(session, payload.get("reason", "")),
             "resume": lambda: engine.resume(session),
@@ -352,16 +359,16 @@ class DiscussionService:
                 session, tuple(payload.get("issue_ids", ())), payload.get("note", "")
             ),
             "submit_output": lambda: engine.submit_output(
-                session, self.models["SpeakerOutput"](**payload)
+                session, decode_payload("SpeakerOutput")
             ),
             "submit_review": lambda: engine.submit_review(
-                session, self.models["ReviewResult"](**payload)
+                session, decode_payload("ReviewResult")
             ),
             "submit_agenda": lambda: engine.submit_agenda(
-                session, self.models["Agenda"](**payload)
+                session, decode_payload("Agenda")
             ),
             "propose": lambda: engine.propose(
-                session, self.models["HostProposal"](**payload)
+                session, decode_payload("HostProposal")
             ),
         }
         if action == "retry":

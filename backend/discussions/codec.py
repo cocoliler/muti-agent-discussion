@@ -18,6 +18,7 @@ import dataclasses
 import json
 import types
 import typing
+from collections.abc import Mapping, MutableMapping
 from enum import Enum
 from typing import Any, get_args, get_origin, get_type_hints
 
@@ -142,14 +143,15 @@ def decode(target: Any, value: Any, path: str = "") -> Any:
     """按目标类型把 JSON 结构还原为引擎对象。"""
     if target is Any or target is None or target is typing.Any:
         return value
-    if value is None:
-        return None
-
     origin = get_origin(target)
     args = get_args(target)
 
     if origin in _UNION_ORIGINS:
         return _decode_union(args, value, path)
+    if value is None:
+        if target is type(None):
+            return None
+        raise CodecError("不能为 null", path)
     if origin in (list, typing.List):  # noqa: UP006 - 兼容 typing.List
         item_type = args[0] if args else Any
         if not isinstance(value, list):
@@ -170,7 +172,7 @@ def decode(target: Any, value: Any, path: str = "") -> Any:
         if not isinstance(value, list):
             raise CodecError("需要数组", path)
         return {decode(item_type, item, _join(path, index)) for index, item in enumerate(value)}
-    if origin in (dict, typing.Dict):  # noqa: UP006
+    if origin in (dict, Mapping, MutableMapping):
         key_type, value_type = (args + (Any, Any))[:2] if args else (Any, Any)
         if not isinstance(value, dict):
             raise CodecError("需要对象", path)
@@ -179,11 +181,6 @@ def decode(target: Any, value: Any, path: str = "") -> Any:
             key = decode(key_type, raw_key, _join(path, raw_key))
             out[key] = decode(value_type, raw_value, _join(path, raw_key))
         return out
-    if origin in (typing.Mapping, typing.MutableMapping, dict):
-        if not isinstance(value, dict):
-            raise CodecError("需要对象", path)
-        return dict(value)
-
     if isinstance(target, type):
         if issubclass(target, Enum):
             try:

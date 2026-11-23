@@ -1,0 +1,125 @@
+.workbench-shell {
+  --surface: #fffefa;
+  --subtle: #f5f5ee;
+  --ink: #202823;
+  --muted: #5c685f;
+  --border: #dde3d9;
+  --accent: #215b46;
+  max-width: none;
+  min-height: 100dvh;
+  color: var(--ink);
+  background: var(--surface);
+  color-scheme: light;
+  font-family: 'DM Sans', 'Microsoft YaHei UI', 'PingFang SC', system-ui, sans-serif;
+}
+.workbench-shell button {
+  border-color: #cfd8cd;
+  background: var(--surface);
+  color: var(--ink);
+}
+.workbench-shell button:hover { background: #edf2e9; }
+.workbench-shell button:disabled { cursor: default; }
+.workbench-shell .primary { background: #255c48; border-color: #255c48; color: #fff; }
+.workbench-shell .primary:hover { background: #194634; }
+.workbench-shell :focus-visible { outline: 2px solid #397a60; outline-offset: 3px; }
+.workbench-shell .topbar { min-height: 64px; padding-inline: clamp(14px, 3vw, 40px); background: var(--surface); }
+.workbench-shell .brand { gap: 10px; }
+.workbench-shell .brand-icon { background: #255c48; color: #fff; width: 36px; height: 36px; font-size: 21px; }
+.workbench-shell .top-actions { gap: 8px; }
+.workbench-shell .live-workspace { grid-template-columns: minmax(186px, 220px) minmax(0, 1fr) clamp(330px, 30vw, 490px); min-height: calc(100dvh - 64px); }
+.workbench-shell .rail, .workbench-shell .spec { background: var(--subtle); }
+.workbench-shell .rail { padding: 24px 16px; max-height: max(530px, calc(100dvh - 64px)); overflow-y: auto; }
+.workbench-shell .rail h2 { color: var(--muted); font-size: 12px; font-weight: 650; margin: 0 0 10px; }
+.workbench-shell .session-status { background: #e6ede1; border: 1px solid #d9e4d6; padding: 12px; }
+.session-status strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; }
+.workbench-shell .roles li { padding: 6px 0; color: var(--ink); }
+.workbench-shell .roles small { display: flex; align-items: center; gap: 5px; }
+.roles i { width: 7px; height: 7px; border-radius: 50%; background: #8b968e; }
+.roles i[data-status='running'] { background: #2563a6; }
+.roles i[data-status='done'], .roles i[data-status='succeeded'] { background: #278457; }
+.roles i[data-status='failed'], .roles i[data-status='timed_out'] { background: #b34047; }
+.budget-panel summary { color: var(--muted); font-size: 13px; cursor: pointer; }
+.budget-panel .budget { margin-top: 12px; }
+.sidebar-tools { display: grid; gap: 8px; margin-top: 16px; }
+.sidebar-tools > details { min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: #fbfcf8; }
+.sidebar-tools > details > .live-form { margin-top: 10px; }
+.sidebar-tools p, .sidebar-tools button { font-size: 13px; }
+.sidebar-tools .json-input { min-height: 150px; }
+.sidebar-tools .sidebar-quota { padding-top: 10px; border-top: 1px solid var(--border); }
+.sidebar-tools .issue-choice label { align-items: flex-start; overflow-wrap: anywhere; }
+.workbench-shell .discussion, .workbench-shell .spec { height: calc(100dvh - 64px); min-height: 530px; }
+.workbench-shell .pane-title { min-height: 78px; padding: 16px clamp(14px, 2vw, 28px); }
+.workbench-shell .pane-title h1 { font-size: 23px; }
+.pane-actions { display: flex; align-items: center; gap: 12px; }
+.pane-actions a { display: none; }
+.workbench-shell a { color: var(--accent); }
+.workbench-shell .thread { padding-block: 20px; scrollbar-color: #bdcbbd transparent; }
+.workbench-shell .thread > * { max-width: 760px; margin-inline: auto; }
+.workbench-shell .welcome { display: grid; gap: 16px; max-width: 540px; margin-block: min(7vh, 65px) 12px; padding: clamp(20px, 4vw, 36px); background: #f8faf4; border: 1px solid var(--border); border-radius: 14px; }
+.workbench-shell .welcome textarea { min-height: 114px; }
+.workbench-shell .project-settings label { margin-top: 9px; }
+.workbench-shell summary { color: var(--accent); font-size: 13px; cursor: pointer; }
+.workbench-shell .message { border-color: var(--border); padding: 16px 0; }
+.workbench-shell .message-body p { color: var(--ink); }
+.workbench-shell .avatar { color: #2d5846 !important; }
+.workbench-shell .event-label { background: #eef1e9; color: #4d6054; }
+.workbench-shell .references button { background: #f5f7f0; color: var(--accent); }
+.workbench-shell .highlight { outline-color: #438469; }
+.next-step { margin-block: 20px 8px; padding: 14px 16px; background: #edf4ea; border: 1px solid #d0e3d1; border-radius: 12px; }
+.next-step-heading { display: flex; gap: 10px; align-items: flex-start; }
+.next-step h2 { font-size: 15px; line-height: 1.55; }
+.next-step p { font-size: 13px; color: var(--muted); margin-top: 3px; }
+.next-step > button, .next-step > a { display: inline-block; margin: 12px 0 0 36px; font-size: 13px; }
+.step-symbol { flex: 0 0 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; background: #d8e9dc; color: #226345; }
+.agenda-form { margin: 14px 0 0 36px; }
+.workbench-shell .workbench-controls { background: #fbfcf8; scrollbar-color: #bdcbbd transparent; }
+.workbench-shell .live-form input:not([type='checkbox']), .workbench-shell .live-form textarea, .workbench-shell .live-form select {
+  border-color: #cfd9cd;
+  color: var(--ink);
+  background: var(--surface);
+}
+.workbench-shell input[type='checkbox'] { accent-color: #255c48; }
+.workbench-shell .error { background: #fff0ed; color: #8d3238; }
+.workbench-shell .spec-empty { border-color: #cfd9cd; background: #fbfcf8; margin: 18px; }
+.workbench-shell .spec-content { flex: 1; min-height: 0; scrollbar-color: #bdcbbd transparent; }
+.spec-navigation { display: grid; padding: 0 16px 12px; gap: 12px; border-bottom: 1px solid var(--border); }
+.spec-tabs { display: flex; gap: 12px; }
+.workbench-shell .spec-tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; padding: 12px 2px 8px; color: var(--muted); font-size: 13px; }
+.workbench-shell .spec-tabs button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.spec-tabs span { font-size: 11px; border-radius: 6px; padding: 1px 4px; background: #e4eae0; }
+.workbench-shell .versions { flex-wrap: wrap; gap: 6px; }
+.workbench-shell .versions button { padding: 4px 7px; font-size: 12px; }
+.workbench-shell .versions button[aria-pressed='true'] { color: var(--accent); background: #e8f0e6; border-color: #a3bea8; }
+.spec-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.workbench-shell .spec-meta .verdict { margin: 0; padding: 3px 7px; font-weight: 650; }
+.workbench-shell .verdict.pass { background: #e1f0e5; color: #1d6548; }
+.workbench-shell .verdict.revise, .workbench-shell .verdict.needs_input { background: #f7ead8; color: #7c4820; }
+.spec-product { margin-top: 10px; font-size: 18px; }
+.workbench-shell .requirement { background: var(--surface); }
+.workbench-shell .requirement > header { color: var(--accent); }
+.workbench-shell .requirement ul { color: var(--ink); }
+.workbench-shell .requirement .removed { background: #fbe9e6; color: #9c3740; }
+.workbench-shell .requirement .added { background: #e6f3e5; color: #20593e; }
+.review-finding { border-top: 1px solid var(--border); padding-top: 10px; }
+.review-finding button { padding: 3px 6px; color: var(--accent); }
+.review-finding p { margin-top: 6px; }
+.spec-actions { display: grid; gap: 10px; padding: 12px 16px; background: #fbfcf8; border-top: 1px solid var(--border); }
+@media (max-width: 1000px) {
+  .workbench-shell .live-workspace { grid-template-columns: 164px minmax(0, 1fr) minmax(280px, 32vw); }
+  .workbench-shell .rail { padding-inline: 10px; }
+}
+@media (max-width: 810px) {
+  .workbench-shell .live-workspace { grid-template-columns: minmax(0, 1fr) minmax(260px, 36vw); }
+  .workbench-shell .rail { padding: 10px 14px; max-height: none; }
+  .workbench-shell .discussion, .workbench-shell .spec { height: max(590px, 76dvh); }
+  .workbench-shell .rail > .budget-panel { display: block; margin-top: 6px; }
+  .workbench-shell .rail > .sidebar-tools { display: grid; }
+}
+@media (max-width: 600px) {
+  .workbench-shell .live-workspace { display: block; }
+  .workbench-shell .discussion { height: max(540px, 78dvh); }
+  .workbench-shell .spec { height: auto; min-height: 0; border-left: 0; border-top: 1px solid var(--border); }
+  .pane-actions a { display: inline; font-size: 13px; }
+  .workbench-shell .top-actions button { font-size: 12px; padding-inline: 7px; }
+  .agenda-form { margin-left: 0; }
+}

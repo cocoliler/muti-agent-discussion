@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .discussions.routes import install
 from .scenario import APPROVED_STAGE, BACKEND, scenario_draft, scenario_events
 
 DB = Path(os.getenv("DISCUSSION_DB", str(BACKEND / ".data/discussions.sqlite3")))
@@ -120,6 +121,8 @@ def export(session_id: UUID):
             "Content-Disposition": 'attachment; filename="meeting-room.design-spec.json"'
         })
 
+
+install(app)
 
 dist = BACKEND.parent / "frontend/dist"
 if (dist / "index.html").is_file():
