@@ -167,6 +167,8 @@ flowchart LR
 
 项目名称写入 `product_name`。痛点、风险、方案、讨论消息、来源映射、人工决策、评审和修订记录作为工作台内部记录保存，由稳定需求 ID 关联。附件中的 PRD 模板和追溯矩阵用于整理内部材料，导出 JSON 只包含现有 Schema 允许的字段。
 
+上述映射、追溯检查与导出已由仓库内 [`spec_handoff/`](spec_handoff/README.md) 实现：记录员草稿先经结构、来源、验收条件与需求 ID 稳定检查，签收门禁通过后才生成可导入正文。
+
 ### 6.2 本地导入与 API 交接
 
 首版可将签收后的正式规格正文导出为 JSON，经 FlowStudio 现有规格导入入口验证。直接联通时，由交接适配器提交 `POST /api/v1/projects/{project_id}/spec-revisions`，请求体为 `{ expected_revision, content }`，其中 `content` 是同一份已签收正文。FlowStudio 返回正式 `SpecRevision` 后，工作台记录其 ID 与草稿、评审和确认时间的关联。首次保存使用 `expected_revision: 0`，后续保存使用读取到的目标版本。

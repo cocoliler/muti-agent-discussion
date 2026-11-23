@@ -98,3 +98,5 @@ async def run_session_tasks(session_id, snapshots):
 - [FlowStudio v3.1 基线](BASELINE.md)
 - [设计规格模型](architecture/DESIGN_SPEC_MODEL.md)
 - [FlowStudio REST API](architecture/API_SPECIFICATION.md)
+- [讨论编排内核](discussion_orchestration/README.md)
+- [规格校验与 FlowStudio 交接](spec_handoff/README.md)
