@@ -118,11 +118,19 @@ class DiscussionService:
         handoff = self.repo.get_handoff(session_id)
         if not handoff:
             raise ApiError("VALIDATION_FAILED", "尚未签收，无法导出", status=409)
-        drafts = self.repo.history(session_id)["drafts"]
-        current = next((d for d in drafts if d["is_current"]), drafts[-1] if drafts else None)
-        if current is None:
-            raise ApiError("VALIDATION_FAILED", "当前会话没有草稿", status=409)
-        return {"content": current["content"], "draft_id": current["id"], "handoff": handoff}
+        raw = handoff.get("content_json")
+        if not raw:
+            raise ApiError("VALIDATION_FAILED", "签收记录缺少规格正文，无法导出", status=409)
+        try:
+            content = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ApiError("VALIDATION_FAILED", "签收正文损坏，无法导出", status=409) from exc
+        return {
+            "content": content,
+            "draft_id": handoff.get("draft_id"),
+            "content_hash": handoff.get("content_hash"),
+            "handoff": handoff,
+        }
 
     # ------------------------------------------------------------------ 写
 
@@ -221,25 +229,33 @@ class DiscussionService:
 
         session, meta = self._load(session_id)
         self._check_version(session_id, expected_state_version, meta)
+
+        # 签收门禁以 spec_handoff.sign_off 为权威（纯读，不改状态）。
+        # 先判门禁再调引擎：否则引擎已推进、交接却说不可签收，就成了半提交。
+        signoff = self._sign_off(session, draft_id=draft_id, input_version=input_version)
+        if not signoff.ok:
+            return 200, self._signoff_rejected(session, meta, signoff)
+
         decision = self.engine.confirm(session, draft_id=draft_id, input_version=input_version)
 
         if not decision.ok:
             return self._reject(decision)
 
-        review = None
-        for item in getattr(session, "reviews", ()):
-            if item.draft_id == draft_id:
-                review = item
-        if review is None:
-            raise ApiError("VALIDATION_FAILED", "找不到该草稿的评审记录", status=409)
+        record = signoff.handoff
+        if record is None:  # pragma: no cover - sign_off 成功必然带交接记录
+            raise ApiError("VALIDATION_FAILED", "签收结果缺少交接记录", status=409)
 
+        content_hash = getattr(record, "content_hash", None)
+        content_json = json.dumps(dict(record.content), ensure_ascii=False)
         handoff = {
             "draft_id": draft_id,
-            "review_id": review.review_id,
+            "review_id": record.review_id,
             "input_version": input_version,
-            "confirmed_at": utcnow(),
+            "confirmed_at": getattr(record, "confirmed_at", None) or utcnow(),
             "handoff_status": "confirmed",
             "spec_expected_revision": spec_expected_revision,
+            "content_hash": content_hash,
+            "content_json": content_json,
             "idempotency_key": idempotency_key,
         }
         body = {
@@ -247,9 +263,10 @@ class DiscussionService:
             "handoff": {
                 "status": "confirmed",
                 "draft_id": draft_id,
-                "review_id": review.review_id,
+                "review_id": record.review_id,
                 "input_version": input_version,
                 "spec_expected_revision": spec_expected_revision,
+                "content_hash": content_hash,
                 "confirmed_at": handoff["confirmed_at"],
                 "spec_revision_id": None,
                 # 导出路由属第 7 个候选操作，未登记契约前默认不暴露，避免漂移检查拦截
@@ -406,6 +423,34 @@ class DiscussionService:
                 detail={"decision": envelope["decision"]},
             )
         return 200, envelope
+
+    def _sign_off(self, session: Any, *, draft_id: str, input_version: int) -> Any:
+        """调用成员 5 的签收门禁。纯读：只回答"能不能签"，不推进状态。"""
+        try:
+            from spec_handoff import sign_off
+        except ImportError as exc:  # pragma: no cover - 仓库内总存在
+            raise ApiError(
+                "VALIDATION_FAILED",
+                "缺少 spec_handoff 模块，无法校验签收条件",
+                status=500,
+            ) from exc
+        return sign_off(session, draft_id=draft_id, input_version=input_version)
+
+    def _signoff_rejected(self, session: Any, meta: Mapping[str, Any], result: Any) -> dict[str, Any]:
+        """签收门禁拒绝：200 + decision.ok=false，附可定位的 findings（不占用幂等键）。"""
+        findings = [item.as_dict() for item in getattr(result, "findings", ())]
+        first = findings[0] if findings else {}
+        return {
+            "decision": {
+                "ok": False,
+                "code": first.get("code") or "VALIDATION_FAILED",
+                "message": first.get("message") or "签收校验未通过",
+                "waiting_for": None,
+                "seq": None,
+            },
+            "session": self._render(session, meta),
+            "result": {"findings": findings},
+        }
 
     def _replay(self, scope: str, key: str, request_hash: str) -> tuple[int, dict[str, Any]] | None:
         row = self.repo.get_idempotent(scope, key)

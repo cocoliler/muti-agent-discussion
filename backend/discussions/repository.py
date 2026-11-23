@@ -107,7 +107,11 @@ class DiscussionRepository:
 
     #: 已发布表结构上新增的列（CREATE TABLE IF NOT EXISTS 不会补列）。
     COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
-        "spec_handoffs": {"spec_expected_revision": "INTEGER NOT NULL DEFAULT 0"},
+        "spec_handoffs": {
+            "spec_expected_revision": "INTEGER NOT NULL DEFAULT 0",
+            "content_hash": "TEXT",
+            "content_json": "TEXT",
+        },
     }
 
     def init_schema(self) -> None:
@@ -291,12 +295,15 @@ class DiscussionRepository:
                 # 签收与状态更新同事务，避免"已签收但会话未推进"的半提交
                 conn.execute(
                     "INSERT INTO spec_handoffs(session_id, draft_id, review_id, input_version,"
-                    " confirmed_at, handoff_status, spec_revision_id, spec_expected_revision, idempotency_key)"
-                    " VALUES (?,?,?,?,?,?,?,?,?)"
+                    " confirmed_at, handoff_status, spec_revision_id, spec_expected_revision,"
+                    " content_hash, content_json, idempotency_key)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
                     " ON CONFLICT(session_id) DO UPDATE SET draft_id = excluded.draft_id,"
                     " review_id = excluded.review_id, input_version = excluded.input_version,"
                     " confirmed_at = excluded.confirmed_at, handoff_status = excluded.handoff_status,"
                     " spec_expected_revision = excluded.spec_expected_revision,"
+                    " content_hash = excluded.content_hash,"
+                    " content_json = excluded.content_json,"
                     " spec_revision_id = excluded.spec_revision_id",
                     (
                         session.session_id,
@@ -307,6 +314,8 @@ class DiscussionRepository:
                         handoff.get("handoff_status", "confirmed"),
                         handoff.get("spec_revision_id"),
                         int(handoff.get("spec_expected_revision", 0) or 0),
+                        handoff.get("content_hash"),
+                        handoff.get("content_json"),
                         handoff.get("idempotency_key"),
                     ),
                 )
@@ -590,18 +599,33 @@ class DiscussionRepository:
         input_version: int,
         idempotency_key: str | None = None,
         spec_expected_revision: int = 0,
+        content_hash: str | None = None,
+        content_json: str | None = None,
     ) -> dict[str, Any]:
         now = utcnow()
         with self._write() as conn:
             conn.execute(
                 "INSERT INTO spec_handoffs(session_id, draft_id, review_id, input_version, confirmed_at,"
-                " handoff_status, spec_expected_revision, idempotency_key) VALUES (?,?,?,?,?, 'confirmed', ?, ?)"
+                " handoff_status, spec_expected_revision, content_hash, content_json, idempotency_key)"
+                " VALUES (?,?,?,?,?, 'confirmed', ?, ?, ?, ?)"
                 " ON CONFLICT(session_id) DO UPDATE SET draft_id = excluded.draft_id,"
                 " review_id = excluded.review_id, input_version = excluded.input_version,"
                 " confirmed_at = excluded.confirmed_at, handoff_status = 'confirmed',"
                 " spec_expected_revision = excluded.spec_expected_revision,"
+                " content_hash = excluded.content_hash,"
+                " content_json = excluded.content_json,"
                 " idempotency_key = COALESCE(excluded.idempotency_key, spec_handoffs.idempotency_key)",
-                (session_id, draft_id, review_id, input_version, now, spec_expected_revision, idempotency_key),
+                (
+                    session_id,
+                    draft_id,
+                    review_id,
+                    input_version,
+                    now,
+                    spec_expected_revision,
+                    content_hash,
+                    content_json,
+                    idempotency_key,
+                ),
             )
         return self.get_handoff(session_id) or {}
 

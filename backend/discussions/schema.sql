@@ -111,6 +111,9 @@ CREATE TABLE IF NOT EXISTS spec_handoffs (
   spec_revision_id TEXT,
   -- §6.2：首次保存 expected_revision=0，后续用读取到的目标版本
   spec_expected_revision INTEGER NOT NULL DEFAULT 0,
+  -- 签收产物：spec_handoff.sign_off 生成的 DesignSpecContent 正文与规范化哈希
+  content_hash     TEXT,
+  content_json     TEXT,
   idempotency_key  TEXT
 );
 

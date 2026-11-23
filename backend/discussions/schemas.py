@@ -163,6 +163,8 @@ class HandoffView(_Strict):
     input_version: int
     spec_expected_revision: int = 0
     confirmed_at: str
+    #: spec_handoff 生成的规范化正文哈希，用于比对服务端实际保存的内容
+    content_hash: str | None = None
     spec_revision_id: str | None = None
     #: 导出路由未登记契约（默认关闭）时为 null
     export_url: str | None = None
