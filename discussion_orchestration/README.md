@@ -132,6 +132,6 @@ engine.propose(session, HostProposal(
 - 角色提示词、模拟与真实模型适配、超时重试、用量采集（由角色执行层承担）；
 - HTTP 接口、数据库持久化、事务与幂等（由后端协调服务承担）；
 - 群聊界面、消息增量轮询、决策卡与差异视图（由前端承担）；
-- 规格正文校验、`DesignSpecContent` 转换与签到后的版本保存（由交付层承担）。
+- 规格正文校验、`DesignSpecContent` 转换与签收后的版本保存（由交付层 [`spec_handoff/`](../spec_handoff/README.md) 承担）。
 
 本包对外提供 `Decision`（含 `code`、`waiting_for`、`detail`）、`SpeakerTask`、`SpeakerOutput`、`ReviewResult` 与会话快照，以上各层在调用前后自行负责各自职责。

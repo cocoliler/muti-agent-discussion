@@ -26,6 +26,20 @@ Requirement={id: string 1–64，pattern ^[A-Za-z][A-Za-z0-9_-]*$; kind: functio
 5. 非关键假设随候选显示；确认保存必须提交确认的 assumption ID。用户拒绝则修改规格重规划或人工改计划，不自动补业务功能。
 6. 重新规划不覆盖旧版。当前规格变更只使旧版来源显示 outdated，不改变旧版 validity。
 
+## 交付校验与签收（实现：spec_handoff/）
+
+讨论工作台交给 FlowStudio 的正文由 `spec_handoff/` 生成与把关，结构规则直接读本文对应的 Schema，语义与导入校验、后端严格模型一致。任一 `error` 都不能签收，也不能导出可导入正文。
+
+| 检查 | 规则 | 失败码 |
+|---|---|---|
+| 结构 | 必填字段、未知字段、枚举、长度、控制字符、ID 模式 | `SPEC_REQUIRED` / `UNKNOWN_FIELD` / `INVALID_VALUE` |
+| 需求 ID | 同一版本唯一；跨修订沿用，消失的需求须写入 `removed_requirement_ids` | `DUPLICATE_ID` / `ID_DROPPED` |
+| 来源 | 每条需求引用本会话已提交消息；已确认痛点、须处理风险必须有需求覆盖 | `SOURCE_MISSING` / `SOURCE_UNKNOWN` / `REQUIRED_UNCOVERED` |
+| 验收 | 每条需求至少一条非空验收条件，同需求内不重复；风险整改须有可观察条件 | `ACCEPTANCE_MISSING` / `ACCEPTANCE_DUPLICATE` |
+| 签收 | 当前草稿、同版本 PASS 评审、无阻断发现或问题、输入版本一致 | `REVIEW_NOT_PASSED` / `BLOCKING_FINDING` / `OPEN_BLOCKING_ISSUE` / `STALE_DRAFT` |
+
+通过后生成 `SpecHandoff`（正文、`review_id`、`content_hash`）。正文以 UTF-8 JSON 导出，根节点即 `DesignSpecContent`，`content_hash` 与 `SpecRevision.hash` 同一规范化算法；写入服务端使用 `expected_revision` CAS 与 `Idempotency-Key`，版本冲突时保留草稿并换新键重投。
+
 ## 通用规划参数（无预设模板）
 PlanningConfig={model:string, granularity:coarse/standard/fine, planning_constraints:string[], policy?:PlanningPolicy}。
 PlanningPolicy={schema_version:"1.0",rules_version:"1.0",allowed_stages:string[]|null,allowed_roles:string[]|null,allowed_categories:string[]|null,allowed_stage_edges:{from,to}[]|null,required_categories:string[]}。
