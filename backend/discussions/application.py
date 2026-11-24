@@ -29,7 +29,7 @@ class DiscussionService:
         export_enabled: bool = False,
     ) -> None:
         self.repo = repository
-        #: 导出路由是否已登记契约（决定 confirm 是否返回 export_url）
+        #: 导出路由是否开启（决定 confirm 是否返回 export_url）
         self.export_enabled = export_enabled
         if engine is None or models is None:
             from discussion_orchestration import (  # 惰性导入：未装引擎时本模块仍可导入
@@ -106,7 +106,7 @@ class DiscussionService:
             "items": items,
             "has_more": has_more,
             "last_seq": meta["last_seq"],
-            # 不透明游标：契约列表统一用 next_cursor:null|string
+            # 不透明游标：列表统一返回 next_cursor:null|string
             "next_cursor": str(tail) if has_more else None,
         }
 
@@ -269,7 +269,7 @@ class DiscussionService:
                 "content_hash": content_hash,
                 "confirmed_at": handoff["confirmed_at"],
                 "spec_revision_id": None,
-                # 导出路由属第 7 个候选操作，未登记契约前默认不暴露，避免漂移检查拦截
+                # 导出不在 §6 的 6 个操作内，默认不暴露。
                 "export_url": (
                     f"/api/v1/discussions/{session_id}/export" if self.export_enabled else None
                 ),
