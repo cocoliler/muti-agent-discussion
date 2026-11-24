@@ -32,6 +32,8 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
   const items = requirements(draft);
   const reviews = session?.reviews.filter((review) => review.draft_id === selected?.draft_id) ?? [];
   const current = !!selected && selected.draft_id === active?.draft_id;
+  const receipt = handoff?.draft_id === selected?.draft_id ? handoff : null;
+  const exportUrl = current && session?.status === 'completed' ? session.export_url ?? receipt?.export_url : null;
   const verdict = reviews.at(-1)?.verdict ?? draft?.review_verdict;
   const comparing = comparison && !!prior && !!draft;
 
@@ -81,9 +83,9 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
         {session?.status === 'completed' && current ? <span className="verdict pass">已签收</span>
           : verdict && <span className={`verdict ${verdict}`}>{verdictLabels[verdict] ?? verdict}</span>}
       </div>
-      {handoff?.draft_id === selected.draft_id && <div className="handoff">
-        {handoff.content_hash && <p>正文哈希 <code>{handoff.content_hash}</code></p>}
-        {handoff.export_url && <a href={handoff.export_url}>下载签收规格 JSON</a>}
+      {(receipt || exportUrl) && <div className="handoff">
+        {receipt?.content_hash && <p>正文哈希 <code>{receipt.content_hash}</code></p>}
+        {exportUrl && <a href={exportUrl}>下载签收规格 JSON</a>}
       </div>}
       {view === 'draft' && <>
       {draft?.content.product_name && <h3 className="spec-product">{draft.content.product_name}</h3>}

@@ -120,6 +120,9 @@ def create_router(
 
     service_dep = Depends(configured_service)
 
+    def export_url(sid: str) -> str | None:
+        return f"/api/v1/discussions/{sid}/export" if with_export else None
+
     @router.post(
         "/projects/{project_id}/discussions",
         response_model=SessionView,
@@ -152,7 +155,11 @@ def create_router(
 
     @router.get("/discussions/{session_id}", response_model=SessionView, operation_id="getDiscussion")
     def get_discussion(session_id: str, service: DiscussionService = service_dep) -> Any:
-        return service.view(_uuid(session_id, "session_id"))
+        sid = _uuid(session_id, "session_id")
+        state = service.view(sid)
+        if state["status"] == "completed":
+            state["export_url"] = export_url(sid)
+        return state
 
     @router.get(
         "/discussions/{session_id}/messages",
@@ -256,6 +263,9 @@ def create_router(
             scope=f"POST /api/v1/discussions/{sid}/confirm",
             request_id=_request_id(request),
         )
+        # 下载地址取决于当前应用挂载的路由，旧签收回执也可在升级后重放。
+        if payload.get("handoff"):
+            payload["handoff"]["export_url"] = export_url(sid)
         return JSONResponse(payload, status_code=status)
 
     if with_export:
@@ -265,7 +275,7 @@ def create_router(
             sid = _uuid(session_id, "session_id")
             payload = service.export_content(sid)
             return JSONResponse(
-                payload,
+                payload["content"],
                 headers={"Content-Disposition": 'attachment; filename="design-spec.json"'},
             )
 

@@ -142,6 +142,7 @@ class ClarificationView(_Strict):
 
 
 class SessionView(_Strict):
+    export_url: str | None = None
     id: str
     project_id: str
     status: str

@@ -122,7 +122,7 @@ def export(session_id: UUID):
         })
 
 
-install(app, with_agents=True)
+install(app, with_agents=True, with_export=True)
 
 dist = BACKEND.parent / "frontend/dist"
 if (dist / "index.html").is_file():

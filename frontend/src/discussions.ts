@@ -37,6 +37,7 @@ export type Finding = { code?: string; path?: string; message?: string; finding_
   target_item?: string; summary?: string; severity?: string; close_condition?: string; responsible_role?: string };
 
 export type Session = {
+  export_url?: string | null;
   id: string;
   project_id: string;
   status: string;

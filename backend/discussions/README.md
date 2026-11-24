@@ -25,14 +25,14 @@ backend/discussions/
 from backend.discussions.routes import install
 
 install(app)                    # 只追加路由与异常处理器，既有 demo 路由原样保留
-install(app, with_export=True)  # JSON 导出，默认关闭
+install(app, with_export=True)  # 正式工作台启用签收后的下载；嵌入式服务可按需启用
 ```
 
 存储路径由环境变量 `DISCUSSION_DB` 决定，默认 `backend/.data/discussions.sqlite3`。首次连接自动建表；启动时把上次未终结的调用置为 `FAILED` / `PROCESS_INTERRUPTED`，避免前端一直看到「运行中」。
 
 ## 接口
 
-严格 6 条，与 `FLOWSTUDIO_DESIGN_INPUT.md` §6 一一对应；不额外注册路由。
+讨论的 6 项操作对应 `FLOWSTUDIO_DESIGN_INPUT.md` §6。正式工作台额外启用签收规格下载。
 
 | 方法 | 路径 | 成功码 | 说明 |
 | --- | --- | --- | --- |
@@ -42,6 +42,9 @@ install(app, with_export=True)  # JSON 导出，默认关闭
 | POST | `/api/v1/discussions/{id}/messages` | 200 | 用户补充/回复，带上下文 `input_version` |
 | POST | `/api/v1/discussions/{id}/actions` | 200 | `pause`/`resume`/`cancel`/`extend_quota`/`require_changes`/`resolve_issues`/`submit_*` |
 | POST | `/api/v1/discussions/{id}/confirm` | 200 | 签收：先过 `spec_handoff.sign_off` 门禁，通过后写 `spec_handoffs`（含正文与 `content_hash`） |
+| GET | `/api/v1/discussions/{id}/export` | 200 | 下载已签收的 UTF-8 `DesignSpecContent` 正文；未签收时返回 409 |
+
+签收回执的 `handoff.export_url` 和已完成会话详情的 `export_url` 都指向下载入口。下载使用签收时保存的正文，哈希及交接信息保存在签收记录中。
 
 所有写命令要求 `Idempotency-Key`（UUID），scope 为「HTTP 方法 + 资源路径」：同键同体回放原响应，同键异体返回 409 `IDEMPOTENCY_CONFLICT`，入参校验失败不占用键。
 
