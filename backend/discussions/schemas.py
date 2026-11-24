@@ -16,6 +16,7 @@ ActionType = Literal[
     "cancel",
     "extend_quota",
     "retry",
+    "run_agents",
     "abandon_task",
     "require_changes",
     "resolve_issues",
@@ -86,6 +87,7 @@ class ParticipantView(_Strict):
     role: str
     status: str
     attempt_no: int | None = None
+    error_code: str | None = None
 
 
 class DraftSummary(_Strict):
@@ -134,6 +136,8 @@ class SessionView(_Strict):
     last_seq: int
     state_version: int
     participants: list[ParticipantView] = Field(default_factory=list)
+    pending_tasks: list[dict[str, Any]] = Field(default_factory=list)
+    agent_mode: str = "simulation"
     active_draft: DraftSummary | None = None
     drafts: list[DraftHistoryItem] = Field(default_factory=list)
     reviews: list[ReviewSummary] = Field(default_factory=list)

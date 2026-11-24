@@ -32,7 +32,9 @@
 .workbench-shell .rail h2 { color: var(--muted); font-size: 12px; font-weight: 650; margin: 0 0 10px; }
 .workbench-shell .session-status { background: #e6ede1; border: 1px solid #d9e4d6; padding: 12px; }
 .session-status strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; }
-.workbench-shell .roles li { padding: 6px 0; color: var(--ink); }
+.workbench-shell .roles li { padding: 3px 0; color: var(--ink); }
+.workbench-shell .role-task { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px; text-align: left; font-size: 13px; }
+.task-chevron { margin-left: auto; color: var(--accent); font-size: 17px; }
 .workbench-shell .roles small { display: flex; align-items: center; gap: 5px; }
 .roles i { width: 7px; height: 7px; border-radius: 50%; background: #8b968e; }
 .roles i[data-status='running'] { background: #2563a6; }
@@ -47,10 +49,26 @@
 .sidebar-tools .json-input { min-height: 150px; }
 .sidebar-tools .sidebar-quota { padding-top: 10px; border-top: 1px solid var(--border); }
 .sidebar-tools .issue-choice label { align-items: flex-start; overflow-wrap: anywhere; }
+.task-dialog { width: min(490px, calc(100vw - 28px)); max-height: 85dvh; padding: 18px; border: 1px solid var(--border); border-radius: 14px; color: var(--ink); background: var(--surface); }
+.task-dialog::backdrop { background: #13251d80; }
+.task-dialog-header { display: flex; align-items: start; gap: 10px; }
+.task-dialog-header h2 { font-size: 19px; }
+.task-dialog-header p, .task-detail-note { margin-top: 5px; color: var(--muted); font-size: 13px; }
+.task-dialog-header button { margin-left: auto; white-space: nowrap; }
+.task-metadata { margin: 16px 0; border-block: 1px solid var(--border); }
+.task-metadata > div { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 8px; padding: 7px 0; font-size: 13px; }
+.task-metadata dt { color: var(--muted); }
+.task-metadata dd { margin: 0; overflow-wrap: anywhere; }
+.task-dialog h3 { margin-top: 15px; font-size: 14px; }
+.task-message-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; }
+.task-message-list button { display: flex; gap: 8px; width: 100%; text-align: left; font-size: 13px; }
+.task-message-list button > :first-child { color: var(--accent); flex-shrink: 0; }
+.task-message-list button > :last-child { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
 .workbench-shell .discussion, .workbench-shell .spec { height: calc(100dvh - 64px); min-height: 530px; }
 .workbench-shell .pane-title { min-height: 78px; padding: 16px clamp(14px, 2vw, 28px); }
 .workbench-shell .pane-title h1 { font-size: 23px; }
-.pane-actions { display: flex; align-items: center; gap: 12px; }
+.pane-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px 12px; }
+.new-chat { white-space: nowrap; font-size: 13px; }
 .pane-actions a { display: none; }
 .workbench-shell a { color: var(--accent); }
 .workbench-shell .thread { padding-block: 20px; scrollbar-color: #bdcbbd transparent; }
@@ -72,6 +90,7 @@
 .next-step > button, .next-step > a { display: inline-block; margin: 12px 0 0 36px; font-size: 13px; }
 .step-symbol { flex: 0 0 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; background: #d8e9dc; color: #226345; }
 .agenda-form { margin: 14px 0 0 36px; }
+.agenda-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
 .workbench-shell .workbench-controls { background: #fbfcf8; scrollbar-color: #bdcbbd transparent; }
 .workbench-shell .live-form input:not([type='checkbox']), .workbench-shell .live-form textarea, .workbench-shell .live-form select {
   border-color: #cfd9cd;
@@ -120,6 +139,7 @@
   .workbench-shell .discussion { height: max(540px, 78dvh); }
   .workbench-shell .spec { height: auto; min-height: 0; border-left: 0; border-top: 1px solid var(--border); }
   .pane-actions a { display: inline; font-size: 13px; }
+  .pane-actions .count { display: none; }
   .workbench-shell .top-actions button { font-size: 12px; padding-inline: 7px; }
   .agenda-form { margin-left: 0; }
 }

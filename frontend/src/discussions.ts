@@ -7,6 +7,7 @@ export type Message = {
   source_seqs: number[];
   item_refs: string[];
   issue_ids: string[];
+  task_id?: string | null;
 };
 
 export type Requirement = {
@@ -44,7 +45,9 @@ export type Session = {
   topic_id: string | null;
   waiting_for: string;
   last_seq: number;
-  participants: { role: string; status: string; attempt_no: number | null }[];
+  participants: { role: string; status: string; attempt_no: number | null; error_code?: string | null }[];
+  pending_tasks?: Task[];
+  agent_mode?: 'simulation' | 'real' | 'off';
   active_draft: Draft | null;
   drafts: (DraftVersion & { current: boolean })[];
   reviews: { review_id: string; draft_id: string; verdict: string; findings: Finding[] }[];
@@ -61,9 +64,12 @@ export type Task = {
   snapshot_ref: string;
   round_no: number;
   topic_id: string;
+  phase?: string;
+  message_seqs?: number[];
+  issue_ids?: string[];
 };
 
-export type Action = 'pause' | 'resume' | 'cancel' | 'extend_quota' | 'retry' | 'abandon_task' |
+export type Action = 'pause' | 'resume' | 'cancel' | 'extend_quota' | 'retry' | 'run_agents' | 'abandon_task' |
   'require_changes' | 'resolve_issues' | 'submit_output' | 'submit_review' | 'submit_agenda' | 'propose';
 
 export type Handoff = { draft_id: string; confirmed_at: string; content_hash: string | null; export_url: string | null };

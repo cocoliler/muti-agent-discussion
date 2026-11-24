@@ -17,11 +17,12 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .application import DiscussionService
+from .agent_execution import AgentExecution
 from .errors import ApiError, error_body
 from .repository import DiscussionRepository, StorageBusy, VersionConflict
 from .schemas import (
@@ -106,9 +107,18 @@ def create_router(
     provider: Callable[[], DiscussionService] = get_service,
     *,
     with_export: bool = False,
+    with_agents: bool = False,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/v1", tags=["discussions"])
-    service_dep = Depends(provider)
+    agents = AgentExecution() if with_agents else None
+
+    def configured_service() -> DiscussionService:
+        service = provider()
+        if agents is not None:
+            service.agent_mode = agents.mode
+        return service
+
+    service_dep = Depends(configured_service)
 
     @router.post(
         "/projects/{project_id}/discussions",
@@ -120,6 +130,7 @@ def create_router(
         project_id: str,
         body: CreateDiscussionRequest,
         request: Request,
+        background_tasks: BackgroundTasks,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         service: DiscussionService = service_dep,
     ) -> Any:
@@ -135,6 +146,8 @@ def create_router(
             scope=f"POST /api/v1/projects/{pid}/discussions",
             request_id=_request_id(request),
         )
+        if agents is not None:
+            background_tasks.add_task(agents.run, service, payload["id"])
         return JSONResponse(payload, status_code=status)
 
     @router.get("/discussions/{session_id}", response_model=SessionView, operation_id="getDiscussion")
@@ -163,6 +176,7 @@ def create_router(
         session_id: str,
         body: PostMessageRequest,
         request: Request,
+        background_tasks: BackgroundTasks,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         service: DiscussionService = service_dep,
     ) -> Any:
@@ -180,6 +194,8 @@ def create_router(
             scope=f"POST /api/v1/discussions/{sid}/messages",
             request_id=_request_id(request),
         )
+        if agents is not None and body.substantive and payload["decision"]["ok"]:
+            background_tasks.add_task(agents.run, service, sid)
         return JSONResponse(payload, status_code=status)
 
     @router.post(
@@ -191,6 +207,7 @@ def create_router(
         session_id: str,
         body: ActionRequest,
         request: Request,
+        background_tasks: BackgroundTasks,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         service: DiscussionService = service_dep,
     ) -> Any:
@@ -206,6 +223,9 @@ def create_router(
             scope=f"POST /api/v1/discussions/{sid}/actions",
             request_id=_request_id(request),
         )
+        if agents is not None and payload["decision"]["ok"] and body.type in {"run_agents", "submit_agenda", "submit_output", "propose",
+                                                      "resolve_issues", "require_changes", "resume"}:
+            background_tasks.add_task(agents.run, service, sid)
         return JSONResponse(payload, status_code=status)
 
     @router.post(
@@ -336,6 +356,7 @@ def install(
     service: DiscussionService | None = None,
     *,
     with_export: bool = False,
+    with_agents: bool = False,
 ) -> None:
     """把讨论接口挂到既有 FastAPI 应用上（不改动 demo 路由）。
 
@@ -344,17 +365,17 @@ def install(
     provider: Callable[[], DiscussionService] = (lambda: service) if service is not None else get_service
     if service is not None:
         service.export_enabled = with_export
-    app.include_router(create_router(provider, with_export=with_export))
+    app.include_router(create_router(provider, with_export=with_export, with_agents=with_agents))
     app.add_middleware(PayloadLimitMiddleware)
     app.add_exception_handler(ApiError, _api_error_handler)
     app.add_exception_handler(VersionConflict, _version_conflict_handler)
     app.add_exception_handler(StorageBusy, _storage_busy_handler)
 
 
-def create_app(service: DiscussionService | None = None) -> Any:
+def create_app(service: DiscussionService | None = None, *, with_agents: bool = False) -> Any:
     """独立启动用（本地调试）：``uvicorn backend.discussions.routes:create_app --factory``。"""
     from fastapi import FastAPI
 
     app = FastAPI(title="多 Agent 需求讨论工作台", version="0.1.0")
-    install(app, service)
+    install(app, service, with_agents=with_agents)
     return app

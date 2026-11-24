@@ -30,7 +30,23 @@ npm.cmd --prefix frontend run build
 
 打开 [本地工作台](http://127.0.0.1:8000/)，输入项目想法并创建讨论。工作台通过 `/api/v1` 读取会话和新增消息，支持回复、人工裁决、追加额度、查看草稿与评审，以及签收当前版本。会话保存在 `backend/.data/discussions.sqlite3`，同一浏览器刷新可恢复最近打开的讨论。
 
-正式讨论由外部执行器提交议题、角色输出和评审结论。联调时可展开「编排联调」手动提交。后端返回各版本摘要和当前草稿正文，工作台可比较本次打开期间加载过的版本。正式签收会保存正文与哈希，导出路由默认关闭。详见[讨论 API](backend/discussions/README.md)。
+正式讨论默认使用模拟 Agent。主持人自动开题，专业角色发言和回应，质疑者提出问题，记录员整理和起草规格，独立评审检查草稿并按需启动修订轮。需要补充或签收时，由用户决定。`DISCUSSION_AGENT_MODE=off` 可切换为手动联调。工作台可比较本次打开期间加载过的草稿版本。正式签收会保存正文与哈希，导出路由默认关闭。[讨论 API](backend/discussions/README.md)
+
+### 使用真实模型
+
+首次配置时，在仓库根目录复制 `.env.example` 为 `.env`，然后在 `.env` 的 `DEEPSEEK_API_KEY=` 后填入你的密钥。Git 会忽略 `.env` 文件。
+
+```powershell
+Copy-Item .env.example .env
+```
+
+从仓库根目录运行以下命令。若后端已经启动，重启后才会读取修改过的配置。
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --env-file .env --host 127.0.0.1 --port 8002
+```
+
+打开 [真实模型工作台](http://127.0.0.1:8002/)。已有对话中断后，可在相应的等待状态点击「继续执行 Agent」或「重试 Agent」。
 
 点击「会议室演示」可使用 `/api/demo` 的固定模拟剧本。按底部操作逐阶段推进，可查看 v1 与 v2 的差异并下载签收 JSON。
 

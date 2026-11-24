@@ -76,7 +76,10 @@ def _specialist(req):
         text += f" 建议把质疑「{message.text[:160]}」作为一次单独的边界测试。"
     elif req.topic:
         text += f" 本轮重点核对「{req.topic}」。"
-    return dict(text=text, basis=basis, source_seqs=_sources(message))
+    result = dict(text=text, basis=basis, source_seqs=_sources(message))
+    if directed:
+        result["verification"] = "；".join(issue.closure_condition for issue in directed)
+    return result
 
 
 def _critic(req):

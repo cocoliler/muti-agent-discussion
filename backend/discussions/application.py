@@ -4,7 +4,7 @@
 
 * 读请求：只读仓储，**不触发任何模型调用**（刷新恢复路径）。
 * 写请求：幂等键 → 读状态 → 校验 state_version → 调引擎 → 单事务落库。
-* 模型调用由成员 2 的 runner 在事务之外完成，本层只接收其结果信封。
+* 自动角色执行在事务之外完成，结果通过相同的版本校验与编排动作写回。
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ class DiscussionService:
         export_enabled: bool = False,
     ) -> None:
         self.repo = repository
+        self.agent_mode = "off"
         #: 导出路由是否已登记契约（决定 confirm 是否返回 export_url）
         self.export_enabled = export_enabled
         if engine is None or models is None:
@@ -371,7 +372,7 @@ class DiscussionService:
                 session, decode_payload("HostProposal")
             ),
         }
-        if action == "retry":
+        if action in {"retry", "run_agents"}:
             # 重试由成员 2 的 runner 执行；本层只把待重试任务原样返回，用于统一审计。
             task_ids = payload.get("task_ids") or []
             tasks = tuple(t for tid, t in getattr(session, "tasks", {}).items() if not task_ids or tid in task_ids)
@@ -528,6 +529,8 @@ class DiscussionService:
             "last_seq": session.last_seq,
             "state_version": meta["state_version"],
             "participants": self._participants(session),
+            "pending_tasks": [self._task_view(task) for task in session.tasks.values()],
+            "agent_mode": self.agent_mode,
             "active_draft": (
                 {
                     "draft_id": draft.draft_id,
@@ -568,14 +571,22 @@ class DiscussionService:
     def _participants(self, session: Any) -> list[dict[str, Any]]:
         """参与者状态：调用尝试 > 本轮已发言 > 已派发待执行。"""
         latest: dict[str, dict[str, Any]] = {}
+        current_ids = set(session.tasks) | {m.task_id for m in session.messages if m.round_no == session.round_no}
+        if session.current_draft:
+            current_ids.add(f"{session.current_draft.draft_id}:agent:review")
         for attempt in self.repo.list_attempts(session.session_id):
+            if attempt["input_version"] != session.input_version:
+                continue
+            if attempt["logical_task_id"] not in current_ids and attempt["task_kind"] != "agenda":
+                continue
             role = attempt["role"]
-            if role not in latest or attempt["attempt_no"] >= latest[role]["attempt_no"]:
-                latest[role] = {
-                    "role": role,
-                    "status": str(attempt["status"]).lower(),
-                    "attempt_no": attempt["attempt_no"],
-                }
+            previous = latest.get(role)
+            priority = (attempt["logical_task_id"] in session.tasks, attempt["started_at"], attempt["attempt_no"])
+            if previous is None or priority >= previous["priority"]:
+                latest[role] = {"priority": priority, "participant": {
+                    "role": role, "status": str(attempt["status"]).lower(), "attempt_no": attempt["attempt_no"],
+                    "error_code": (attempt["error"] or {}).get("code"),
+                }}
 
         done = {
             message.role.value
@@ -588,7 +599,7 @@ class DiscussionService:
         }
         roles = sorted(set(latest) | done | queued)
         return [
-            latest.get(role)
+            (latest[role]["participant"] if role in latest else None)
             or {
                 "role": role,
                 "status": "done" if role in done else "queued",

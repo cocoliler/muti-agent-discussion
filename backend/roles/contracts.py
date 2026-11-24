@@ -157,6 +157,7 @@ class HostOutput(RoleOutput):
 
 class OpinionOutput(RoleOutput):
     basis: Literal["user_statement", "evidence", "assumption", "not_applicable"]
+    verification: Text | None = None
 
 
 class CriticOutput(RoleOutput):
@@ -224,6 +225,8 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
     ]
     if role in get_args(Specialist):
         instructions.append("basis 区分 user_statement、evidence、assumption。如使用 evidence 必须提供来源；仅 market 可用 not_applicable。")
+        if request.issues:
+            instructions.append("回应任务中的每个问题。若有阻断问题，在 verification 写出可执行的验证步骤和预期结果，不要声称已做过测试。")
     if role == "scribe":
         instructions.append("content 必须符合此 FlowStudio Schema：" + json.dumps(SPEC_SCHEMA, ensure_ascii=False))
     instructions.append(json.dumps(OUTPUT_MODELS[role].model_json_schema(), ensure_ascii=False))
@@ -320,6 +323,8 @@ def validate_output(request: RoleRequest, raw: str) -> RoleOutput:
             raise RoleRuleError("only market may mark its assessment not_applicable")
         if output.basis == "evidence" and not output.source_seqs:
             raise RoleRuleError("evidence-based statements must cite an available source")
+        if any(issue.severity == "blocking" for issue in request.issues) and not output.verification:
+            raise RoleRuleError("blocking responses need a verification procedure")
     elif isinstance(output, CriticOutput):
         if not output.source_seqs:
             raise RoleRuleError("critic must cite the message being challenged")

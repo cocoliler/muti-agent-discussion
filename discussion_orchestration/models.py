@@ -264,6 +264,7 @@ class DiscussionSession:
     dispatch_units: int = 0
     round_challenged: bool = False
     paused_from: SessionStatus | None = None
+    paused_waiting_for: WaitingFor | None = None
 
     # ------------------------------------------------------------------ 查询
     @property

@@ -732,15 +732,23 @@ class DiscussionEngine:
             return self._reject(session, ReasonCode.INVALID_TRANSITION, "缺少可恢复的暂停点")
         session.status = session.paused_from or SessionStatus.DISCUSSING
         session.paused_from = None
-        session.waiting_for = WaitingFor.HOST_DECISION
-        self._append(session, Role.HOST, MessageKind.SYSTEM, "恢复讨论，等待主持人调度")
-        return self._result(session, ReasonCode.AWAITING_HOST_DECISION)
+        fallback = {
+            SessionStatus.CLARIFYING: WaitingFor.HOST_AGENDA,
+            SessionStatus.REVIEWING: WaitingFor.REVIEW,
+            SessionStatus.AWAITING_CONFIRMATION: WaitingFor.USER_INPUT,
+        }
+        session.waiting_for = session.paused_waiting_for or fallback.get(
+            session.status, WaitingFor.ROLE_RESULTS if session.tasks else WaitingFor.HOST_DECISION)
+        session.paused_waiting_for = None
+        self._append(session, Role.HOST, MessageKind.SYSTEM, "已恢复讨论")
+        return self._result(session, ReasonCode.OK)
 
     def cancel(self, session: DiscussionSession, reason: str = "") -> Decision:
         if is_terminal(session.status):
             return self._reject(session, ReasonCode.SESSION_TERMINATED, "会话已结束")
         session.status = SessionStatus.CANCELED
         session.paused_from = None
+        session.paused_waiting_for = None
         session.tasks.clear()
         session.waiting_for = WaitingFor.NONE
         self._append(
@@ -1144,6 +1152,7 @@ class DiscussionEngine:
         if not can_pause(session.status):
             return
         session.paused_from = session.status
+        session.paused_waiting_for = session.waiting_for
         session.status = SessionStatus.PAUSED
         session.waiting_for = WaitingFor.HOST_DECISION
         self._append(session, Role.HOST, MessageKind.SYSTEM, message or code.value)

@@ -15,6 +15,10 @@ const waitingLabels: Record<string, string> = {
 const phaseLabels: Record<string, string> = {
   statements: '专业角色发言', challenge: '质疑', responses: '定向回应', integration: '整合', drafting: '成稿',
 };
+const agentPhaseLabels: Record<string, string> = {
+  statements: '专业角色正在并行发言', challenge: '质疑者正在审视本轮发言', responses: '专业角色正在回应问题',
+  integration: '记录员正在整合讨论', drafting: '记录员正在撰写规格',
+};
 const roleLabels: Record<string, string> = {
   user: '你', host: '主持人', product: '产品经理', research: '用户研究员', architect: '技术架构师',
   designer: '交互设计师', business: '商业分析', challenger: '质疑者', recorder: '记录员', reviewer: '独立评审',
@@ -31,6 +35,7 @@ const kindLabels: Record<string, string> = {
   user_input: '用户输入', agenda: '议题', clarification: '澄清', statement: '发言', challenge: '质疑',
   response: '回应', integration: '整合', draft: '草稿', review: '评审', decision: '决定', system: '系统',
 };
+const taskLabels = { ...kindLabels, statement: '专业角色发言', integration: '整合讨论结果', draft: '撰写规格草稿' } as Record<string, string>;
 const budgets = [['rounds', '总轮次'], ['directed', '定向轮次'], ['revisions', '修订轮次'], ['dispatch_units', '派发单元']];
 const storageKey = 'design-room.discussion';
 const projectKey = 'design-room.project';
@@ -64,6 +69,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [snapshots, setSnapshots] = useState<Record<string, Draft>>({});
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskSelection, setTaskSelection] = useState<{ role: string; task?: Task } | null>(null);
+  const taskDialog = useRef<HTMLDialogElement>(null);
   const [handoff, setHandoff] = useState<Handoff | null>(null);
   const [idea, setIdea] = useState('');
   const [text, setText] = useState('');
@@ -80,13 +87,11 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [selectedIssues, setSelectedIssues] = useState<string[]>([]);
   const [quota, setQuota] = useState({ rounds: 0, directed: 0, revisions: 0 });
   const [note, setNote] = useState('');
-  const [agendaOpen, setAgendaOpen] = useState(false);
-  const [agendaTitle, setAgendaTitle] = useState('');
-  const [agendaQuestion, setAgendaQuestion] = useState('');
-  const [agendaSummary, setAgendaSummary] = useState('');
+  const [agendaDraft, setAgendaDraft] = useState<{ version: number; text: string } | null>(null);
   const thread = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const agendaCard = useRef<HTMLElement>(null);
+  const projectIdeaField = useRef<HTMLTextAreaElement>(null);
+  const sessionRead = useRef<AbortController | null>(null);
   const shouldScroll = useRef(true);
   const refresh = useRef<() => Promise<void>>(async () => {});
   const pending = useRef<{ signature: string; key: string } | null>(null);
@@ -94,6 +99,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   useEffect(() => {
     if (!id) return;
     const controller = new AbortController();
+    sessionRead.current = controller;
     let cursor = 0;
     let inflight: Promise<void> | null = null;
     function sync() {
@@ -116,6 +122,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
             setId(null);
             setSession(null);
             setMessages([]);
+            setTaskSelection(null);
           }
           setReadError(describeError(cause));
         }
@@ -138,34 +145,37 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   }, [messages.length]);
 
   useEffect(() => {
-    if (agendaOpen) agendaCard.current?.querySelector('input')?.focus();
-  }, [agendaOpen]);
+    if (taskSelection && !taskDialog.current?.open) taskDialog.current?.showModal();
+  }, [taskSelection]);
 
   function clearSession() {
+    sessionRead.current?.abort();
+    saveStorage(storageKey, null);
     setId(null);
     setSession(null);
     setMessages([]);
     setSnapshots({});
     setTasks([]);
+    setTaskSelection(null);
     setHandoff(null);
     setError('');
     setReadError('');
     setFindings([]);
+    setIdea('');
     setText('');
     setReply(null);
     setAction('');
+    setPayload('');
     setSelectedIssues([]);
     setNote('');
-    setAgendaOpen(false);
-    setAgendaTitle('');
-    setAgendaQuestion('');
-    setAgendaSummary('');
+    setAgendaDraft(null);
     setQuota({ rounds: 0, directed: 0, revisions: 0 });
     setSubstantive(true);
     setHighlight(null);
     setItemRef(null);
     shouldScroll.current = true;
     pending.current = null;
+    requestAnimationFrame(() => projectIdeaField.current?.focus());
   }
 
   async function write<T>(path: string, body: object, onResult: (result: T) => void) {
@@ -246,6 +256,12 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
 
   const terminal = session?.status === 'completed' || session?.status === 'canceled';
   const paused = session?.status === 'paused';
+  const currentTasks = session ? (session.pending_tasks ?? tasks).filter((task) => task.input_version === session.input_version && task.round_no === session.round_no) : [];
+  const selectedTask = taskSelection?.task;
+  const selectedPerson = session?.participants.find((person) => person.role === taskSelection?.role);
+  const relatedMessages = taskSelection ? messages.filter((message) => selectedTask
+    ? message.task_id === selectedTask.task_id || selectedTask.message_seqs?.includes(message.seq)
+    : message.role === taskSelection.role).slice(-5) : [];
   const displayedIssues = session?.open_issues ?? [];
   const selected = displayedIssues.filter((issue) => selectedIssues.includes(issue.issue_id)).map((issue) => issue.issue_id);
   const activeDraft = session?.active_draft;
@@ -253,27 +269,53 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     && activeDraft.input_version === session.input_version;
   const hostWorking = session?.participants.some((person) => person.role === 'host' && person.status === 'running');
   const waitingForAgenda = session?.waiting_for === 'host_agenda' && !paused;
+  const agentsEnabled = session?.agent_mode === 'simulation' || session?.agent_mode === 'real';
+  const autoExchange = agentsEnabled && (session?.waiting_for === 'role_results' || session?.waiting_for === 'review' || session?.waiting_for === 'host_decision');
+  const isWorkingRole = (role: string) => waitingForAgenda ? role === 'host'
+    : session?.waiting_for === 'review' ? role === 'reviewer' : currentTasks.some((task) => task.role === role);
+  const agentRunning = hostWorking || session?.participants.some((person) => isWorkingRole(person.role) && person.status === 'running');
+  const failedAgent = session?.participants.find((person) => person.status === 'failed' && (
+    isWorkingRole(person.role)));
   const projectIdea = messages.find((message) => message.kind === 'user_input')?.text;
+  const latestIdea = messages.filter((message) => message.kind === 'user_input').at(-1)?.text.trim() ?? '';
+  const editingAgenda = agendaDraft !== null && agendaDraft.version === session?.input_version;
+  const agendaText = editingAgenda ? agendaDraft.text : latestIdea;
+  const startDiscussion = () => {
+    const question = agendaText.trim();
+    if (!question) return;
+    act('submit_agenda', {
+      summary: question,
+      items: [{ topic_id: 'T1', title: question.split(/\r?\n/, 1)[0].slice(0, 80), question }],
+    }, () => setAgendaDraft(null));
+  };
   const nextStep = paused ? '讨论已暂停' : terminal ? statusLabels[session!.status]
-    : waitingForAgenda && hostWorking ? '主持人正在整理议题'
-      : waitingForAgenda ? '待提交议题'
+    : agentsEnabled && (waitingForAgenda || autoExchange) && failedAgent && !agentRunning ? '有 Agent 执行失败'
+      : waitingForAgenda ? (agentsEnabled ? '主持人正在整理议题' : '准备开始讨论')
+        : autoExchange ? (session.waiting_for === 'review' ? '独立评审正在检查规格'
+          : session.waiting_for === 'host_decision' ? '等待下一步调度' : agentPhaseLabels[session.phase ?? ''] ?? 'Agent 正在处理')
         : session?.status === 'awaiting_confirmation' ? '待审阅并签收'
           : session && waitingLabels[session.waiting_for];
 
   return <div className="shell workbench-shell">
     <header className="topbar">
       <div className="brand"><span className="brand-icon" aria-hidden="true">✳</span><div><strong>Design Room</strong><small>多 Agent 需求工作台</small></div></div>
-      <div className="top-actions"><button disabled={busy} onClick={openDemo}>会议室演示</button>
-        {id && <button className="primary" disabled={busy} onClick={clearSession}>＋ 新建讨论</button>}</div>
+      <div className="top-actions"><button disabled={busy} onClick={openDemo}>会议室演示</button></div>
     </header>
     <div className="workspace live-workspace">
       <aside className="rail" aria-label="讨论状态和参与者">
         <h2>当前会话</h2>
         <div className="session-status"><strong>{projectIdea || (session ? '项目讨论' : '新讨论')}</strong>
           {session && <p>{statusLabels[session.status] ?? session.status} · 输入 v{session.input_version}{session.round_no > 0 && ` · 第 ${session.round_no} 轮`}</p>}</div>
-        {session && <><h2>参与角色</h2><ul className="roles">{session.participants.map((person) => <li key={person.role}>
-          <Avatar role={person.role} /><span>{roleLabels[person.role] ?? person.role}<small><i data-status={person.status} />{participantLabels[person.status] ?? person.status}{person.attempt_no != null && ` · 尝试 ${person.attempt_no}`}</small></span>
-        </li>)}</ul>
+        {session && <><h2>参与角色</h2><ul className="roles">{session.participants.map((person) => {
+          const task = currentTasks.find((item) => item.role === person.role);
+          const name = roleLabels[person.role] ?? person.role;
+          return <li key={person.role}>
+            <button className="role-task" aria-haspopup="dialog" aria-label={`查看${name}详情`} onClick={() => setTaskSelection({ role: person.role, task })}>
+              <Avatar role={person.role} /><span>{name}<small><i data-status={person.status} />{participantLabels[person.status] ?? person.status}{person.attempt_no != null && ` · 尝试 ${person.attempt_no}`}</small></span>
+              <span className="task-chevron" aria-hidden="true">›</span>
+            </button>
+          </li>;
+        })}</ul>
         <details className="budget-panel"><summary>讨论额度</summary><dl className="budget">{budgets.map(([key, name]) => <div key={key}><dt>{name}</dt><dd>剩余 {session.budget[`${key}_left`] ?? 0}</dd></div>)}</dl></details></>}
         {session && !terminal && <div className="sidebar-tools">
           <details><summary>人工决策与额度</summary>
@@ -297,10 +339,12 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
             </div>
           </details>
           {!paused && <details><summary>编排联调</summary>
-            <div className="live-form"><p>后端等待外部执行器回传结果。联调时可在此提交对应的 JSON。</p>
-              <div className="action-row"><button disabled={busy} onClick={() => act('retry')}>请求待重试任务</button></div>
-              {tasks.filter((task) => task.input_version === session.input_version && task.round_no === session.round_no).map((task) => <div className="action-row" key={task.task_id}>
-                <span>{roleLabels[task.role] ?? task.role} · {kindLabels[task.kind] ?? task.kind}</span>
+            <div className="live-form"><p>{agentsEnabled ? '角色任务由 Agent 执行。联调时也可在这里手动提交结果。' : '可在这里手动提交议题和角色结果。'}</p>
+              {!session.pending_tasks && <div className="action-row"><button disabled={busy} onClick={() => act('retry')}>读取待处理任务</button></div>}
+              {currentTasks.map((task) => <div className="action-row" key={task.task_id}>
+                <button aria-haspopup="dialog" onClick={() => setTaskSelection({ role: task.role, task })}>
+                  {roleLabels[task.role] ?? task.role} · {taskLabels[task.kind] ?? task.kind}
+                </button>
                 <button disabled={busy} onClick={() => {
                   const { task_id, session_id, role, kind, input_version, snapshot_ref, round_no, topic_id } = task;
                   editAction('submit_output', { task_id, session_id, role, kind, input_version, snapshot_ref, round_no, topic_id });
@@ -326,7 +370,10 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
       </aside>
       <main className="discussion">
         <header className="pane-title"><div><h1>项目讨论</h1>{session?.phase && <p>{phaseLabels[session.phase] ?? session.phase}</p>}</div>
-          {session && <div className="pane-actions"><span className="count">{session.last_seq} 条消息</span><a href="#live-spec-title">查看规格</a></div>}</header>
+          {id && <div className="pane-actions">
+            {session && <><span className="count">{session.last_seq} 条消息</span><a href="#live-spec-title">查看规格</a></>}
+            <button className="primary new-chat" disabled={busy} onClick={clearSession}>＋ 新聊天</button>
+          </div>}</header>
         <div ref={thread} className="thread" aria-label="讨论消息" onScroll={(event) => {
           const element = event.currentTarget;
           shouldScroll.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
@@ -344,33 +391,34 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
               </div>
             </div></article>) : <form className="welcome live-form" onSubmit={(event) => { event.preventDefault(); create(); }}>
             <h2>你想做什么产品？</h2>
-            <label>项目想法<textarea required maxLength={4000} rows={4} placeholder="例如：做一个内部会议室预约工具，首版支持查空闲和预约。" value={idea} onChange={(event) => setIdea(event.target.value)} /></label>
+            <label>项目想法<textarea ref={projectIdeaField} required maxLength={4000} rows={4} placeholder="例如：做一个内部会议室预约工具，首版支持查空闲和预约。" value={idea} onChange={(event) => setIdea(event.target.value)} /></label>
             <details className="project-settings"><summary>项目设置</summary><label>项目 ID（UUID）<input value={projectId} onChange={(event) => setProjectId(event.target.value)} /></label></details>
             <button className="primary" disabled={busy || !idea.trim() || !projectId.trim()}>创建讨论</button>
           </form>}
           {id && !session && !readError && <p role="status">正在恢复讨论…</p>}
-          {session && nextStep && <section className="next-step" ref={agendaCard} aria-labelledby="next-step-title">
+          {session && nextStep && <section className="next-step" aria-labelledby="next-step-title">
             <div className="next-step-heading"><span className="step-symbol" aria-hidden="true">{terminal ? '✓' : '↳'}</span><div>
               <h2 id="next-step-title" role="status">{nextStep}</h2>
-              {waitingForAgenda && !hostWorking && <p>提交一个议题后，编排器会派发首轮角色任务。</p>}
-              {session.waiting_for === 'role_results' && !paused && <p>收到角色结果后，会显示在讨论中。</p>}
+              {agentsEnabled && (waitingForAgenda || autoExchange) && <p>{session.agent_mode === 'simulation' ? '模拟 Agent' : '模型 Agent'}生成的发言会自动显示在讨论中。</p>}
+              {failedAgent?.error_code === 'PROVIDER_CONFIG' && <p>请检查后端的 DeepSeek 密钥和模型名配置。</p>}
+              {session.waiting_for === 'role_results' && !paused && !autoExchange && <p>收到角色结果后，会显示在讨论中。</p>}
             </div></div>
-            {waitingForAgenda && !hostWorking && !agendaOpen && <button className="primary" disabled={busy} onClick={() => setAgendaOpen(true)}>提交议题</button>}
+            {!paused && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent ? '重试 Agent' : '继续执行 Agent'}</button>}
             {session.waiting_for === 'user_input' && !paused && !terminal && <button onClick={() => composer.current?.focus()}>补充信息</button>}
             {canConfirm && <a href="#live-spec-title">查看待签收规格</a>}
-            {waitingForAgenda && !hostWorking && agendaOpen && <form className="live-form agenda-form" onSubmit={(event) => {
+            {waitingForAgenda && !agentsEnabled && <form className="live-form agenda-form" onSubmit={(event) => {
               event.preventDefault();
-              if (!agendaTitle.trim() || !agendaQuestion.trim() || !agendaSummary.trim()) return;
-              act('submit_agenda', {
-                summary: agendaSummary.trim(),
-                items: [{ topic_id: 'T1', title: agendaTitle.trim(), question: agendaQuestion.trim() }],
-              }, () => { setAgendaOpen(false); setAgendaTitle(''); setAgendaQuestion(''); setAgendaSummary(''); });
+              startDiscussion();
             }}>
-              <label>议题标题<input required value={agendaTitle} onChange={(event) => setAgendaTitle(event.target.value)} /></label>
-              <label>要讨论的问题<input required value={agendaQuestion} onChange={(event) => setAgendaQuestion(event.target.value)} /></label>
-              <label>议题说明<textarea required rows={2} value={agendaSummary} onChange={(event) => setAgendaSummary(event.target.value)} /></label>
-              <div className="action-row"><button className="primary" disabled={busy || !agendaTitle.trim() || !agendaQuestion.trim() || !agendaSummary.trim()}>提交议题</button>
-                <button type="button" disabled={busy} onClick={() => setAgendaOpen(false)}>收起</button></div>
+              {editingAgenda || !latestIdea ? <label>要讨论什么？<textarea autoFocus={editingAgenda} required rows={2} maxLength={8000}
+                value={agendaText} onChange={(event) => setAgendaDraft({ version: session.input_version, text: event.target.value })} /></label>
+                : <p className="agenda-preview">{latestIdea}</p>}
+              <div className="action-row">
+                <button className="primary" disabled={busy || !agendaText.trim()}>开始讨论</button>
+                {latestIdea && (editingAgenda
+                  ? <button type="button" disabled={busy} onClick={() => setAgendaDraft(null)}>取消修改</button>
+                  : <button type="button" disabled={busy} onClick={() => setAgendaDraft({ version: session.input_version, text: latestIdea })}>修改议题</button>)}
+              </div>
             </form>}
           </section>}
         </div>
@@ -396,11 +444,36 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
           </div>
         </footer>}
       </main>
-      <DiscussionSpec session={session} snapshots={snapshots} handoff={handoff} locate={locate} itemRef={itemRef} busy={busy}
+      <DiscussionSpec key={id} session={session} snapshots={snapshots} handoff={handoff} locate={locate} itemRef={itemRef} busy={busy}
         confirm={canConfirm ? () => command('/confirm', {
           draft_id: activeDraft.draft_id, input_version: session.input_version, spec_expected_revision: 0,
         }) : undefined}
         requestChanges={session?.status === 'awaiting_confirmation' ? (reason) => act('require_changes', { reason }) : undefined} />
     </div>
+    {session && taskSelection && <dialog className="task-dialog" ref={taskDialog} aria-labelledby="task-dialog-title" onClose={() => setTaskSelection(null)}>
+      <header className="task-dialog-header">
+        <Avatar role={taskSelection.role} />
+        <div><h2 id="task-dialog-title">{roleLabels[taskSelection.role] ?? taskSelection.role} · 详情</h2>
+          {selectedTask && <p>{taskLabels[selectedTask.kind] ?? selectedTask.kind}</p>}</div>
+        <button onClick={() => taskDialog.current?.close()}>关闭</button>
+      </header>
+      <dl className="task-metadata">
+        {selectedPerson && <div><dt>角色状态</dt><dd>{participantLabels[selectedPerson.status] ?? selectedPerson.status}</dd></div>}
+        <div><dt>讨论轮次</dt><dd>第 {selectedTask?.round_no ?? session.round_no} 轮</dd></div>
+        <div><dt>输入版本</dt><dd>v{selectedTask?.input_version ?? session.input_version}</dd></div>
+        {(selectedTask?.topic_id ?? session.topic_id) && <div><dt>议题</dt><dd>{selectedTask?.topic_id ?? session.topic_id}</dd></div>}
+        {selectedPerson?.attempt_no != null && <div><dt>执行尝试</dt><dd>第 {selectedPerson.attempt_no} 次</dd></div>}
+        {selectedPerson?.error_code && <div><dt>失败原因</dt><dd>{selectedPerson.error_code}</dd></div>}
+        {selectedTask && <div><dt>任务 ID</dt><dd><code>{selectedTask.task_id}</code></dd></div>}
+        {!!selectedTask?.issue_ids?.length && <div><dt>关联问题</dt><dd>{selectedTask.issue_ids.join('、')}</dd></div>}
+      </dl>
+      {!selectedTask && <p className="task-detail-note">此角色当前没有待处理任务。</p>}
+      <h3>{selectedTask ? '关联消息' : '角色近期消息'}</h3>
+      {relatedMessages.length > 0 ? <ul className="task-message-list">{relatedMessages.map((message) => <li key={message.seq}>
+        <button onClick={() => { taskDialog.current?.close(); requestAnimationFrame(() => locate(message.seq)); }}>
+          <span>#{message.seq}</span><span>{message.text}</span>
+        </button>
+      </li>)}</ul> : <p className="task-detail-note">暂无消息。</p>}
+    </dialog>}
   </div>;
 }
