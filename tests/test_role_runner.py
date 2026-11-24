@@ -27,9 +27,18 @@ class Fake:
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_research_can_correct_a_missing_or_out_of_scope_source(self):
+        bad = {"text": "建议核实", "basis": "evidence", "source_seqs": [17]}
+        good = {"text": "建议核实", "basis": "assumption", "source_seqs": []}
+        provider = Fake(Completion(json.dumps(bad)), Completion(json.dumps(good)))
+        result = await RoleRunner("s", provider, mode="real").run(request(role="research"))
+        self.assertIsNone(result.error)
+        self.assertEqual(len(result.attempts), 2)
+        self.assertIn("17", result.attempts[0].diagnostic)
+
     async def test_invalid_source_is_diagnosable_with_usage(self):
         output = {"text": "test", "source_seqs": [999], "basis": "evidence"}
-        runner = RoleRunner("s", Fake(Completion(json.dumps(output), {"total_tokens": 7})), mode="real")
+        runner = RoleRunner("s", Fake(Completion(json.dumps(output), {"total_tokens": 7})), mode="real", call_limit=1)
         result = await runner.run(request())
         self.assertEqual(result.error, "invalid_output")
         self.assertIn("source_seqs", result.attempts[0].diagnostic)

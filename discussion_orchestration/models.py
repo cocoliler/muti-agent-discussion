@@ -174,6 +174,7 @@ class ReviewFinding:
     close_condition: str
     responsible_role: Role | None = None
     issue_id: str | None = None
+    source_seqs: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

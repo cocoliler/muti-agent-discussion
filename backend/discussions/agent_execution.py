@@ -11,7 +11,7 @@ from spec_handoff.draft import DraftSpec
 
 from backend.roles.contracts import DraftSnapshot, PriorIssue, RoleRequest, SourceMessage
 from backend.roles.provider import DeepSeekProvider
-from backend.roles.runner import OUTPUT_CORRECTION_ROLES, RoleRunner
+from backend.roles.runner import RoleRunner
 from backend.roles.simulation import SimulationProvider
 from .errors import ApiError
 from .repository import VersionConflict
@@ -153,37 +153,62 @@ class AgentExecution:
         topic = f"{item.title}｜{item.question}" if item else None
         draft = session.current_draft
         if session.status == SessionStatus.REVIEWING and session.waiting_for == WaitingFor.REVIEW and draft:
+            parent_id = draft.parent_id
+            if parent_id is None and draft.version > 1:
+                # 兼容已冻结的旧会话，只读取本会话紧邻的上一版本，无需回写历史。
+                parent_id = next((d.draft_id for d in session.drafts if d.version == draft.version - 1), None)
             return [self._job(session, history, idea, "reviewer", "review", session.topic_id or "T1",
-                              topic=topic, draft=draft, issues=self._review_issues(session, draft.parent_id))]
+                              topic=topic, draft=draft, issues=self._review_issues(session, parent_id, history))]
         if session.status != SessionStatus.DISCUSSING or session.waiting_for != WaitingFor.ROLE_RESULTS:
             return []
         jobs = []
         for task in session.tasks.values():
             all_messages = task.kind in (TaskKind.INTEGRATION, TaskKind.DRAFT)
             messages = history if all_messages else [m for m in history if m.seq in task.message_seqs]
-            issues = self._review_issues(session, draft.draft_id) if all_messages and draft else []
+            previous = session.drafts[-1] if session.drafts and all_messages else None
+            issues = self._review_issues(session, previous.draft_id, history) if previous else []
+            parent = draft if all_messages else None
+            # 回答被替换后只能使用新的可见消息重建正文；旧评审项仍要逐项复核。
+            if previous and issues and not replaced:
+                parent = previous
             if task.kind == TaskKind.RESPONSE:
                 issues = [self._prior_issue(session, session.issues[issue_id], task.role.value) for issue_id in task.issue_ids
                           if issue_id in session.issues]
             jobs.append(self._job(session, messages, idea, task.role.value, task.kind.value, task.topic_id,
                                   task=task, topic=topic, allowed_roles=item.role_scope if item else None,
-                                  draft=draft if all_messages else None, issues=issues))
+                                  draft=parent, issues=issues))
         return jobs
 
     @staticmethod
-    def _prior_issue(session, issue, owner, finding=None) -> PriorIssue:
+    def _prior_issue(session, issue, owner) -> PriorIssue:
         closing = next((m.text for m in session.messages if m.seq == issue.closed_by_seq), None)
         return PriorIssue(issue_id=issue.issue_id, severity="blocking" if issue.severity.value == "blocking" else "advisory",
-                          target_item=finding.target_item if finding else "background", description=issue.summary,
+                          target_item="background", description=issue.summary,
                           owner_role=ROLE_ALIASES.get(owner, owner),
-                          closure_condition=finding.close_condition if finding else issue.summary,
+                          closure_condition=issue.summary,
                           treatment=closing, source_seqs=[issue.closed_by_seq] if closing else [])
 
-    def _review_issues(self, session, draft_id) -> list[PriorIssue]:
+    def _review_issues(self, session, draft_id, history) -> list[PriorIssue]:
         review = session.review_of(draft_id) if draft_id else None
-        return [self._prior_issue(session, session.issues[finding.issue_id], finding.responsible_role.value, finding)
-                for finding in (review.findings if review else ())
-                if finding.issue_id in session.issues and finding.responsible_role is not None]
+        if review is None:
+            return []
+        visible = {m.seq: m for m in history if m.text.strip()}
+        result = []
+        for finding in review.findings:
+            # NEEDS_INPUT 的发现存在评审记录中，只有 REVISE 会创建定向整改任务。
+            key = finding.issue_id or finding.finding_id
+            issue = session.issues.get(key)
+            closure = issue.closed_by_seq if issue and issue.input_version == review.input_version else None
+            message = visible.get(closure)
+            owner = finding.responsible_role.value if finding.responsible_role else "recorder"
+            refs = list(finding.source_seqs)
+            if message and message.seq not in refs:
+                refs.append(message.seq)
+            result.append(PriorIssue(issue_id=key, target_item=finding.target_item, description=finding.summary,
+                                     severity="blocking" if finding.severity.value == "blocking" else "advisory",
+                                     owner_role=ROLE_ALIASES.get(owner, owner), closure_condition=finding.close_condition,
+                                     treatment=message.text if message else None, source_seqs=refs))
+        return result
 
     @staticmethod
     def _job(session, messages, idea, role, kind, topic_id, *, task=None, topic=None, allowed_roles=None, draft=None, issues=()) -> Job:
@@ -195,6 +220,7 @@ class AgentExecution:
             snapshot = DraftSnapshot(id=draft.draft_id, session_id=session.session_id, input_version=draft.input_version,
                                      revision=draft.version, content=spec.to_content(),
                                      source_map={req.requirement_id: list(req.source_seqs) for req in spec.requirements})
+        messages = [m for m in messages if m.text.strip()]
         visible = {m.seq for m in messages}
         request = RoleRequest(
             role=ROLE_ALIASES.get(role, role), logical_task_id=task_id, session_id=session.session_id,
@@ -202,7 +228,7 @@ class AgentExecution:
             round=max(1, session.round_no), messages=[
                 SourceMessage(session_id=session.session_id, input_version=m.input_version, seq=m.seq,
                               role=ROLE_ALIASES.get(m.role.value, m.role.value), text=m.text)
-                for m in messages if m.text.strip()
+                for m in messages
             ], draft=snapshot,
             issues=[issue.model_copy(update={"source_seqs": [seq for seq in issue.source_seqs if seq in visible]}) for issue in issues],
             **({"allowed_roles": [ROLE_ALIASES.get(r.value, r.value) for r in allowed_roles]}
@@ -220,6 +246,7 @@ class AgentExecution:
                        "verdict": output["verdict"].lower(), "questions": output["questions"],
                        "question_options": output.get("question_options", {}), "findings": [
                            {"finding_id": finding["issue_id"], "issue_id": finding["issue_id"],
+                            "source_seqs": finding["source_seqs"],
                             "severity": "blocking" if finding["severity"] == "blocking" else "major",
                             "target_item": finding["target_item"], "summary": finding["description"],
                             "close_condition": finding["closure_condition"],
@@ -300,8 +327,7 @@ class AgentExecution:
         previous = max(existing, key=lambda row: row["attempt_no"], default=None)
         number = previous["attempt_no"] + 1 if previous else 1
         diagnostic = None
-        if (previous and job.request.role in OUTPUT_CORRECTION_ROLES
-                and previous["input_version"] == job.request.input_version
+        if (previous and previous["input_version"] == job.request.input_version
                 and previous["snapshot_ref"] == job.snapshot_ref):
             error = previous["error"] or {}
             if error.get("code") == "invalid_output":

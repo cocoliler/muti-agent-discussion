@@ -545,6 +545,10 @@ class DiscussionEngine:
             )
         if any(existing.review_id == review.review_id for existing in session.reviews):
             return self._reject(session, ReasonCode.CONTRACT_MISMATCH, "评审 ID 重复")
+        for finding in review.findings:
+            problem = citation_problem(session, finding.source_seqs, None)
+            if problem:
+                return self._reject(session, *problem)
 
         if review.verdict == Verdict.PASS:
             blocking_findings = [
@@ -1075,7 +1079,8 @@ class DiscussionEngine:
     def _finalize_draft(
         self, session: DiscussionSession, output: SpeakerOutput, seq: int
     ) -> Decision:
-        current = session.current_draft
+        # 用户补充会取消旧稿的 current 标记，但上一份冻结稿仍是新版本的父稿。
+        current = session.drafts[-1] if session.drafts else None
         for draft in session.drafts:
             draft.current = False
         version = len(session.drafts) + 1

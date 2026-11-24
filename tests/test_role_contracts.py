@@ -102,6 +102,10 @@ class RoleContractTests(unittest.TestCase):
         req = task("reviewer", draft=frozen(), issues=[issue()])
         closed = dict(issue(), description="已检查两个并发响应。", status="closed", source_seqs=[7])
         self.check(req, review(findings=[closed]))
+        with self.assertRaisesRegex(RoleRuleError, "findings/0/source_seqs.*99"):
+            self.check(req, review(findings=[dict(closed, source_seqs=[99])]))
+        with self.assertRaisesRegex(RoleRuleError, "previously tracked issue"):
+            self.check(task("reviewer", draft=frozen()), review(findings=[closed]))
         for output in (review(draft_id="d1"), review(), review(findings=[dict(closed, status="open")]),
                        review(findings=[dict(closed, target_item="FR-01")]),
                        review(findings=[dict(closed, severity="advisory")]),

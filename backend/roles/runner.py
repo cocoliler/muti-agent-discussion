@@ -13,9 +13,6 @@ from .contracts import Finding, OUTPUT_MODELS, RoleRequest, RoleRuleError, build
 from .provider import Completion, ProviderError
 
 
-OUTPUT_CORRECTION_ROLES = frozenset({"scribe", "reviewer"})
-
-
 class Provider(Protocol):
     async def complete(self, request: RoleRequest, messages: list[dict]) -> Completion: ...
 
@@ -93,7 +90,6 @@ class RoleRunner:
                 validation_diagnostic = previous.attempts[-1].diagnostic
 
         messages = build_messages(request)
-        can_correct_output = request.role in OUTPUT_CORRECTION_ROLES
         self._active.add(task_id)
         try:
             for number in range(len(result.attempts) + 1, 3):
@@ -110,7 +106,7 @@ class RoleRunner:
                 try:
                     async with asyncio.timeout(self.timeout_seconds):
                         prompt = messages
-                        if can_correct_output and validation_diagnostic:
+                        if validation_diagnostic:
                             # 反馈仅包含服务端校验诊断，原任务快照和冻结稿保持一致。
                             feedback = {"role": "user", "content": json.dumps(
                                 {"previous_validation_error": validation_diagnostic}, ensure_ascii=False)}
@@ -155,7 +151,7 @@ class RoleRunner:
                     result.attempts.append(Attempt(attempt_no=number, status=status, elapsed_seconds=monotonic() - start,
                                                    usage=usage, error=error, diagnostic=diagnostic))
                     result.error = error
-                if error == "invalid_output" and can_correct_output:
+                if error == "invalid_output":
                     validation_diagnostic = diagnostic
                     retryable = self.calls_used < self.call_limit
                 if not retryable or number == 2:

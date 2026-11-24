@@ -10,6 +10,8 @@ import httpx
 from fastapi.testclient import TestClient
 
 from backend.discussions.routes import build_service, create_app
+from backend.discussions.agent_execution import AgentExecution
+from discussion_orchestration import SessionStatus, WaitingFor
 from backend.roles.contracts import RoleRequest
 from backend.roles.provider import Completion, DeepSeekProvider, ProviderError
 from backend.roles.simulation import SimulationProvider
@@ -156,6 +158,22 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 self.assertTrue(answer.json()["decision"]["ok"], answer.text)
                 resumed = client.get(path).json()
                 self.assertEqual(resumed["input_version"], state["input_version"] + 1)
+                session, _ = service._load(state["id"])
+                second = session.drafts[1]
+                first = session.drafts[0]
+                self.assertEqual(second.parent_id, first.draft_id)
+                # 旧数据库的 v2 没有 parent_id，重试也必须收到 v1 的结构化评审。
+                for draft in session.drafts:
+                    draft.current = draft is second
+                second.parent_id = None
+                session.status, session.waiting_for = SessionStatus.REVIEWING, WaitingFor.REVIEW
+                job, = AgentExecution()._jobs(session)
+                prior = {f.issue_id: list(f.source_seqs) for f in session.review_of(first.draft_id).findings}
+                self.assertTrue(prior)
+                self.assertTrue(all(prior.values()))
+                self.assertEqual({i.issue_id: i.source_seqs for i in job.request.issues}, prior)
+                self.assertTrue(all(set(i.source_seqs) <= {m.seq for m in job.request.messages}
+                                    for i in job.request.issues))
                 self.assertEqual(resumed["active_draft"]["content"]["target_users"], ["行政人员"])
                 self.assertIsNone(resumed["clarification"])
                 original = next(message for message in answer.json()["new_messages"] if message["role"] == "user")
