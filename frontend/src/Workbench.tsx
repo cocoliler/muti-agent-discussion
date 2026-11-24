@@ -401,6 +401,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
               <h2 id="next-step-title" role="status">{nextStep}</h2>
               {agentsEnabled && (waitingForAgenda || autoExchange) && <p>{session.agent_mode === 'simulation' ? '模拟 Agent' : '模型 Agent'}生成的发言会自动显示在讨论中。</p>}
               {failedAgent?.error_code === 'PROVIDER_CONFIG' && <p>请检查后端的 DeepSeek 密钥和模型名配置。</p>}
+              {failedAgent?.diagnostic && <p>输出校验失败：{failedAgent.diagnostic}</p>}
               {session.waiting_for === 'role_results' && !paused && !autoExchange && <p>收到角色结果后，会显示在讨论中。</p>}
             </div></div>
             {!paused && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent ? '重试 Agent' : '继续执行 Agent'}</button>}
@@ -464,6 +465,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
         {(selectedTask?.topic_id ?? session.topic_id) && <div><dt>议题</dt><dd>{selectedTask?.topic_id ?? session.topic_id}</dd></div>}
         {selectedPerson?.attempt_no != null && <div><dt>执行尝试</dt><dd>第 {selectedPerson.attempt_no} 次</dd></div>}
         {selectedPerson?.error_code && <div><dt>失败原因</dt><dd>{selectedPerson.error_code}</dd></div>}
+        {selectedPerson?.diagnostic && <div><dt>校验详情</dt><dd>{selectedPerson.diagnostic}</dd></div>}
         {selectedTask && <div><dt>任务 ID</dt><dd><code>{selectedTask.task_id}</code></dd></div>}
         {!!selectedTask?.issue_ids?.length && <div><dt>关联问题</dt><dd>{selectedTask.issue_ids.join('、')}</dd></div>}
       </dl>

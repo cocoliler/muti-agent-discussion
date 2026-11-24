@@ -47,6 +47,8 @@ install(app, with_export=True)  # JSON 导出，默认关闭
 
 ## 数据表
 
+当最新调用因输出校验失败时，讨论详情的 `participants[].error_code` 为 `invalid_output`，可选的 `diagnostic` 给出字段或规则。例如 `literal_error at findings/0/severity` 表示第一条评审发现的严重度枚举不合法。对应的调用记录保存在 `role_attempts.error`，旧版记录没有该字段。
+
 `discussion_sessions`（整包 `session_state` + `state_version`）、`discussion_messages`（`PRIMARY KEY(session_id, seq)`）、`role_attempts`、`draft_revisions`、`review_results`、`spec_handoffs`（含签收正文 `content_json` 与 `content_hash`）、`idempotency_keys`、`discussion_events`。
 
 ## 三条不可违背的实现约定

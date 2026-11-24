@@ -587,6 +587,7 @@ class DiscussionService:
                 latest[role] = {"priority": priority, "participant": {
                     "role": role, "status": str(attempt["status"]).lower(), "attempt_no": attempt["attempt_no"],
                     "error_code": (attempt["error"] or {}).get("code"),
+                    "diagnostic": (attempt["error"] or {}).get("diagnostic"),
                 }}
 
         done = {

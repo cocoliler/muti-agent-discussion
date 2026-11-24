@@ -9,7 +9,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ValidationError
 
-from .contracts import OUTPUT_MODELS, RoleRequest, RoleRuleError, build_messages, validate_output
+from .contracts import Finding, OUTPUT_MODELS, RoleRequest, RoleRuleError, build_messages, validate_output
 from .provider import Completion, ProviderError
 
 
@@ -65,7 +65,7 @@ class RoleRunner:
             raise ValueError("extra_calls must be a positive integer")
         self.call_limit += extra_calls
 
-    async def run(self, request: RoleRequest) -> RoleResult:
+    async def run(self, request: RoleRequest, *, review_diagnostic: str | None = None) -> RoleResult:
         if request.session_id != self.session_id:
             raise ValueError("request belongs to a different discussion")
         request = request.model_copy(deep=True)
@@ -103,7 +103,13 @@ class RoleRunner:
                 retryable = False
                 try:
                     async with asyncio.timeout(self.timeout_seconds):
-                        response = await self.provider.complete(request, messages)
+                        prompt = messages
+                        if request.role == "reviewer" and review_diagnostic:
+                            # 反馈仅包含服务端校验诊断，原任务快照和冻结稿保持一致。
+                            feedback = {"role": "user", "content": json.dumps(
+                                {"previous_validation_error": review_diagnostic}, ensure_ascii=False)}
+                            prompt = [messages[0], feedback, messages[1]]
+                        response = await self.provider.complete(request, prompt)
                     usage = response.usage
                     try:
                         output = validate_output(request, response.content)
@@ -115,6 +121,10 @@ class RoleRunner:
                         location = first["loc"]
                         if location and location[0] in OUTPUT_MODELS[request.role].model_fields:
                             diagnostic += " at " + location[0]
+                            if request.role == "reviewer" and location[0] == "findings" and len(location) >= 3:
+                                index, field = location[1:3]
+                                if isinstance(index, int) and field in Finding.model_fields:
+                                    diagnostic += f"/{index}/{field}"
                     except RoleRuleError as exc:
                         error, diagnostic = "invalid_output", str(exc)
                     except json.JSONDecodeError as exc:
@@ -139,6 +149,9 @@ class RoleRunner:
                     result.attempts.append(Attempt(attempt_no=number, status=status, elapsed_seconds=monotonic() - start,
                                                    usage=usage, error=error, diagnostic=diagnostic))
                     result.error = error
+                if error == "invalid_output" and request.role == "reviewer":
+                    review_diagnostic = diagnostic
+                    retryable = self.calls_used < self.call_limit
                 if not retryable or number == 2:
                     break
             return result

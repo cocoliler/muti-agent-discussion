@@ -69,16 +69,17 @@ class AgentExecution:
                         if self.mode == "real" else SimulationProvider())
         except ValueError:
             for job in jobs:
-                number = self._start(service, job)
+                number, _ = self._start(service, job)
                 self._finish(service, job, number, "FAILED", error={"code": "PROVIDER_CONFIG"})
             return
 
         runner = RoleRunner(session_id, provider, mode=self.mode)
         while jobs:
-            numbers = [self._start(service, job) for job in jobs]
-            results = await asyncio.gather(*(runner.run(job.request) for job in jobs), return_exceptions=True)
+            starts = [self._start(service, job) for job in jobs]
+            results = await asyncio.gather(*(runner.run(job.request, review_diagnostic=diagnostic)
+                                             for job, (_, diagnostic) in zip(jobs, starts)), return_exceptions=True)
             failed = False
-            for job, number, result in zip(jobs, numbers, results):
+            for job, (number, _), result in zip(jobs, starts, results):
                 if isinstance(result, BaseException):
                     self._finish(service, job, number, "FAILED", error={"code": "AGENT_EXECUTION_FAILED"})
                     failed = True
@@ -96,8 +97,11 @@ class AgentExecution:
                     last = index == len(result.attempts) - 1
                     code = error if last else attempt.error
                     status = "FAILED" if code else "SUCCEEDED" if applied else "IGNORED"
+                    failure = {"code": code} if code else None
+                    if code == "invalid_output" and attempt.diagnostic:
+                        failure["diagnostic"] = attempt.diagnostic
                     self._finish(service, job, number + index, status, usage=attempt.usage,
-                                 error={"code": code} if code else None)
+                                 error=failure)
                 if not result.attempts:
                     self._finish(service, job, number, "FAILED", error={"code": error or "NO_OUTPUT"})
                 failed |= bool(error)
@@ -290,11 +294,19 @@ class AgentExecution:
                     raise
         raise ApiError("REVISION_CONFLICT", "讨论状态已更新", status=409)
 
-    def _start(self, service, job: Job) -> int:
-        existing = service.repo.list_attempts(job.request.session_id)
-        number = max((row["attempt_no"] for row in existing if row["logical_task_id"] == job.request.logical_task_id), default=0) + 1
+    def _start(self, service, job: Job) -> tuple[int, str | None]:
+        existing = (row for row in service.repo.list_attempts(job.request.session_id)
+                    if row["logical_task_id"] == job.request.logical_task_id)
+        previous = max(existing, key=lambda row: row["attempt_no"], default=None)
+        number = previous["attempt_no"] + 1 if previous else 1
+        diagnostic = None
+        if (previous and job.kind == "review" and previous["input_version"] == job.request.input_version
+                and previous["snapshot_ref"] == job.snapshot_ref):
+            error = previous["error"] or {}
+            if error.get("code") == "invalid_output":
+                diagnostic = error.get("diagnostic")
         self._record(service, job, number)
-        return number
+        return number, diagnostic
 
     @staticmethod
     def _record(service, job: Job, number: int) -> None:

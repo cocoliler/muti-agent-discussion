@@ -229,6 +229,15 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
             instructions.append("回应任务中的每个问题。若有阻断问题，在 verification 写出可执行的验证步骤和预期结果，不要声称已做过测试。")
     if role == "scribe":
         instructions.append("content 必须符合此 FlowStudio Schema：" + json.dumps(SPEC_SCHEMA, ensure_ascii=False))
+    if role == "reviewer":
+        instructions.append(
+            "draft_id 原样复制 draft.id；target_item 只用 draft.source_map 的需求 ID 或 draft.content 的顶层字段名。"
+            "每个 finding 的 source_seqs 至少填一个当前 messages 中的整数 seq，severity 仅 blocking/advisory。"
+            "新发现用 open。issues 中的历史项逐项沿用 issue_id、target_item、severity 和 closure_condition。"
+            "PASS 不可含开放阻断项；REVISE 至少含一个开放项。这两种结论的 questions 都填 []。"
+            "NEEDS_INPUT 至少含一个开放的 blocking 项，并在 questions 列出需要用户回答的问题。"
+            "如收到上次校验诊断，请针对该字段或规则重新生成完整 JSON，依据冻结稿独立作出判断。"
+        )
     instructions.append(json.dumps(OUTPUT_MODELS[role].model_json_schema(), ensure_ascii=False))
     return [
         {"role": "system", "content": "\n".join(instructions)},

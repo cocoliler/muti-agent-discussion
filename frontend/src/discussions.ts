@@ -45,7 +45,7 @@ export type Session = {
   topic_id: string | null;
   waiting_for: string;
   last_seq: number;
-  participants: { role: string; status: string; attempt_no: number | null; error_code?: string | null }[];
+  participants: { role: string; status: string; attempt_no: number | null; error_code?: string | null; diagnostic?: string | null }[];
   pending_tasks?: Task[];
   agent_mode?: 'simulation' | 'real' | 'off';
   active_draft: Draft | null;

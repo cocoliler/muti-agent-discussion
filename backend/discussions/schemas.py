@@ -88,6 +88,7 @@ class ParticipantView(_Strict):
     status: str
     attempt_no: int | None = None
     error_code: str | None = None
+    diagnostic: str | None = None
 
 
 class DraftSummary(_Strict):
