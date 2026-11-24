@@ -63,6 +63,23 @@ install(app, with_export=True)  # 仅在导出操作登记进契约后再开启
 
 信封固定为 `{"error": {code, message, issues[], request_id}}`，`request_id` 缺省时自动生成。
 
+## 测试
+
+```bash
+python -m unittest discover -s backend/tests -v
+```
+
+80 项，无额外依赖：真实引擎（`discussion_orchestration/`）、真实 SQLite、真实 `TestClient`。
+
+| 文件 | 覆盖 |
+| --- | --- |
+| `test_acceptance.py` | README 成员 3 的三条验收：重启后续读、同一写入重试幂等、跨会话引用拒绝 |
+| `test_api.py` | 路由面严格 6 条、错误信封、幂等键强制、1 MiB 上限、`limit` 20/100 |
+| `test_repository.py` | 事务、`seq` 镜像、CAS 冲突、`after_seq` 分页、换连接后重启往返 |
+| `test_codec.py` | tuple/set/枚举键还原、未知字段保留、`codec_version` 信封 |
+| `test_service.py` | 协调服务：幂等 → 读状态 → 调引擎 → 单事务落库 |
+| `test_engine_contract.py` | 引擎契约：`last_seq` 从 1 起、枚举小写、创建会话派发 5 个任务 |
+
 ## 待办
 
 - 6 个接口尚未登记进 FlowStudio 契约生成流程（`tech/flowstudio_contracts`，位于 SE-lib）；`tech/artifacts/openapi.json` 目前仍不含 `/discussions`。
