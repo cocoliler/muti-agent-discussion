@@ -2,7 +2,7 @@
 
 两条通道刻意分开：
 
-* **契约层错误**（入参非法、版本冲突、幂等冲突）走 HTTP 4xx + 错误信封。
+* **接口层错误**（入参非法、版本冲突、幂等冲突）走 HTTP 4xx + 错误信封。
 * **编排拒绝**（`decision.ok is False`，如等待评审、预算耗尽、越界点名）走
   HTTP 200 + decision 信封 —— 它们是可诊断状态，不是请求失败。
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
-#: 契约层错误码 -> HTTP 状态码（沿用 FlowStudio 既有 ErrorCode 集合）
+#: 接口错误码 -> HTTP 状态码（沿用 FlowStudio 既有 ErrorCode 集合）
 ERROR_STATUS: dict[str, int] = {
     "VALIDATION_FAILED": 422,
     "REVISION_CONFLICT": 409,
@@ -23,7 +23,7 @@ ERROR_STATUS: dict[str, int] = {
     "INTERNAL_ERROR": 500,
 }
 
-#: 引擎 ReasonCode -> (HTTP 状态码, 契约错误码)。未列出的走 200 + decision。
+#: 引擎 ReasonCode -> (HTTP 状态码, 接口错误码)。未列出的走 200 + decision。
 DECISION_ERRORS: dict[str, tuple[int, str]] = {
     "cross_session_reference": (422, "VALIDATION_FAILED"),
     "cross_session_result": (422, "VALIDATION_FAILED"),
@@ -46,7 +46,7 @@ DECISION_ERRORS: dict[str, tuple[int, str]] = {
 
 
 class ApiError(Exception):
-    """契约层错误，由处理器转成错误信封。"""
+    """接口层错误，由处理器转成错误信封。"""
 
     def __init__(
         self,

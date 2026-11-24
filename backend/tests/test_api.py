@@ -273,7 +273,7 @@ class RoutesTest(unittest.TestCase):
         handoff = response.json()["handoff"]
         self.assertEqual(handoff["status"], "confirmed")
         self.assertEqual(handoff["spec_expected_revision"], 0)
-        # 导出未登记契约前不返回可用链接
+        # 导出默认关闭时不返回可用链接
         self.assertIsNone(handoff["export_url"])
 
     def test_export_route_not_registered_by_default(self) -> None:

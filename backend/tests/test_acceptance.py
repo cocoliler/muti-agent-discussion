@@ -36,7 +36,7 @@ ENGINE_AVAILABLE = importlib.util.find_spec("discussion_orchestration") is not N
 SESSION_ID = str(uuid.uuid4())
 PROJECT_ID = str(uuid.uuid4())
 
-CONTRACT_ROUTES = {
+EXPECTED_ROUTES = {
     ("POST", "/api/v1/projects/{project_id}/discussions"),
     ("GET", "/api/v1/discussions/{session_id}"),
     ("GET", "/api/v1/discussions/{session_id}/messages"),
@@ -46,8 +46,8 @@ CONTRACT_ROUTES = {
 }
 
 
-def contract_routes(app) -> set[tuple[str, str]]:
-    """按 OpenAPI 产物取路由集合——与仓库漂移检查的比对口径一致。"""
+def expected_routes(app) -> set[tuple[str, str]]:
+    """按应用自身 OpenAPI 取路由集合，与应用实际注册的路径核对。"""
     found: set[tuple[str, str]] = set()
     for path, operations in app.openapi().get("paths", {}).items():
         if not path.startswith("/api/v1"):
@@ -103,9 +103,9 @@ class AcceptanceTest(unittest.TestCase):
 
     # ------------------------------------------------------------------ 契约
 
-    def test_route_set_matches_contract(self) -> None:
-        """§6 只定义 6 个讨论操作；私加路由会被 export_openapi 的漂移检查拦下。"""
-        self.assertEqual(contract_routes(self.app), CONTRACT_ROUTES)
+    def test_route_set_matches_spec_section(self) -> None:
+        """§6 只定义 6 个讨论操作，应用不额外注册路由。"""
+        self.assertEqual(expected_routes(self.app), EXPECTED_ROUTES)
 
     def test_error_envelope_has_required_fields(self) -> None:
         response = self.client.get("/api/v1/discussions/not-a-uuid")

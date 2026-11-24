@@ -1,6 +1,6 @@
 # 讨论工作台后端（API 与持久化）
 
-讨论工作台的 HTTP 接口与 SQLite 持久化层。编排决策在仓库根目录 `discussion_orchestration/`（成员 1），模型调用在 `backend/roles/`（成员 2）；本目录只负责**把引擎状态存下来、按 `seq` 读回来、按契约暴露出去**。
+讨论工作台的 HTTP 接口与 SQLite 持久化层。编排决策在仓库根目录 `discussion_orchestration/`（成员 1），模型调用在 `backend/roles/`（成员 2）；本目录只负责**把引擎状态存下来、按 `seq` 读回来、按约定的 6 条接口暴露出去**。
 
 依据：`README.md` 分工表、`FLOWSTUDIO_DESIGN_INPUT.md` §5/§6、`architecture/API_SPECIFICATION.md`。
 
@@ -13,7 +13,7 @@ backend/discussions/
 ├── codec.py        # 引擎 dataclass <-> JSON（唯一反射引擎模型的文件）
 ├── schema.sql      # 8 张表，幂等建表 + 已发布库的列迁移
 ├── repository.py   # 事务、seq 镜像、CAS、幂等、调用尝试、草稿/评审/交接
-├── schemas.py      # HTTP 出入参（契约定稿只需改这里）
+├── schemas.py      # HTTP 出入参（对外字段只改这里）
 ├── errors.py       # ReasonCode -> HTTP 映射与错误信封
 ├── application.py  # 协调服务：幂等 -> 读状态 -> 调引擎 -> 单事务落库
 └── routes.py       # /api/v1/discussions/*，含 install(app)
@@ -25,14 +25,14 @@ backend/discussions/
 from backend.discussions.routes import install
 
 install(app)                    # 只追加路由与异常处理器，既有 demo 路由原样保留
-install(app, with_export=True)  # 仅在导出操作登记进契约后再开启
+install(app, with_export=True)  # JSON 导出，默认关闭
 ```
 
 存储路径由环境变量 `DISCUSSION_DB` 决定，默认 `backend/.data/discussions.sqlite3`。首次连接自动建表；启动时把上次未终结的调用置为 `FAILED` / `PROCESS_INTERRUPTED`，避免前端一直看到「运行中」。
 
 ## 接口
 
-严格 6 条，与 `FLOWSTUDIO_DESIGN_INPUT.md` §6 一一对应；契约之外不注册任何路由。
+严格 6 条，与 `FLOWSTUDIO_DESIGN_INPUT.md` §6 一一对应；不额外注册路由。
 
 | 方法 | 路径 | 成功码 | 说明 |
 | --- | --- | --- | --- |
@@ -78,10 +78,9 @@ python -m unittest discover -s backend/tests -v
 | `test_repository.py` | 事务、`seq` 镜像、CAS 冲突、`after_seq` 分页、换连接后重启往返 |
 | `test_codec.py` | tuple/set/枚举键还原、未知字段保留、`codec_version` 信封 |
 | `test_service.py` | 协调服务：幂等 → 读状态 → 调引擎 → 单事务落库 |
-| `test_engine_contract.py` | 引擎契约：`last_seq` 从 1 起、枚举小写、创建会话派发 5 个任务 |
+| `test_engine_contract.py` | 引擎行为前提：`last_seq` 从 1 起、枚举小写、创建会话派发 5 个任务 |
 
 ## 待办
 
-- 6 个接口尚未登记进 FlowStudio 契约生成流程（`tech/flowstudio_contracts`，位于 SE-lib）；`tech/artifacts/openapi.json` 目前仍不含 `/discussions`。
 - 签收后的规格保存由成员 5 的 `SpecRevisionHandoff` 负责（`POST /projects/{id}/spec-revisions`，`expected_revision` CAS + `Idempotency-Key`）；本层负责把返回的 `spec_revision_id` 回填到 `spec_handoffs`。
 - 成员 2 的 runner 需调用 `record_attempt` / `finish_attempt`，才能让 `GET /discussions/{id}` 的参与者状态与预算消耗反映真实调用。
