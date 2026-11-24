@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
+from discussion_orchestration.enums import ReasonCode, SessionStatus
 from discussion_orchestration.models import ClarificationAnswer
 
 from .codec import CodecError, decode, encode
@@ -402,7 +403,14 @@ class DiscussionService:
         request_id: str,
         idempotency: tuple[str, str, str] | None,
     ) -> tuple[int, dict[str, Any]]:
-        if not decision.ok:
+        # 评审通过校验后可能因轮次额度而暂停。保留拒绝结论，并提交引擎进入的暂停状态。
+        review_paused = (
+            action == "submit_review"
+            and meta["status"] == SessionStatus.REVIEWING.value
+            and session.status == SessionStatus.PAUSED
+            and decision.code in (ReasonCode.REVISION_ROUNDS_EXCEEDED, ReasonCode.ROUNDS_EXCEEDED)
+        )
+        if not decision.ok and not review_paused:
             return self._reject(decision)
 
         previous_last_seq = meta["last_seq"]

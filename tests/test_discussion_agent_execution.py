@@ -224,6 +224,45 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                                       ["product", "research", "architect", "designer", "business"])
                 self.assertEqual(client.get(path).json()["waiting_for"], "user_input")
 
+    def test_review_quota_pause_persists_until_authorized_resume(self):
+        cases = [({"max_revision_rounds": 0}, "revision_rounds_exceeded", {"revisions": 1}),
+                 ({"max_total_rounds": 1}, "rounds_exceeded", {"rounds": 1})]
+        for limits, code, quota in cases:
+            with self.subTest(code=code), TemporaryDirectory() as directory, \
+                    patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}):
+                service = build_service(Path(directory) / "discussion.sqlite3")
+                with TestClient(create_app(service, with_agents=True)) as client:
+                    headers = lambda: {"Idempotency-Key": str(uuid4())}
+                    created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                        "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。", "limits": limits,
+                    }, headers=headers())
+                    self.assertEqual(created.status_code, 201, created.text)
+                    session_id = created.json()["id"]
+                    path = f"/api/v1/discussions/{session_id}"
+                    paused = client.get(path).json()
+                    self.assertEqual(paused["status"], "paused")
+                    self.assertEqual(paused["active_draft"]["version"], 1)
+                    self.assertEqual(paused["reviews"], [])
+                    self.assertIn(code, [p["error_code"] for p in paused["participants"]])
+                    before = service.repo.list_attempts(session_id)
+                    blocked_retry = client.post(f"{path}/actions", headers=headers(), json={
+                        "type": "run_agents", "expected_state_version": paused["state_version"],
+                    })
+                    self.assertEqual(blocked_retry.status_code, 200, blocked_retry.text)
+                    self.assertEqual(service.repo.list_attempts(session_id), before)
+                    updated = client.post(f"{path}/actions", headers=headers(), json={
+                        "type": "extend_quota", "payload": quota,
+                        "expected_state_version": client.get(path).json()["state_version"],
+                    })
+                    self.assertTrue(updated.json()["decision"]["ok"], updated.text)
+                    resumed = client.post(f"{path}/actions", headers=headers(), json={
+                        "type": "resume", "expected_state_version": updated.json()["session"]["state_version"],
+                    })
+                    self.assertTrue(resumed.json()["decision"]["ok"], resumed.text)
+                    state = client.get(path).json()
+                    self.assertEqual(state["status"], "awaiting_confirmation", state)
+                    self.assertEqual(state["active_draft"]["version"], 2)
+
     def test_real_provider_runs_revision_until_user_signoff(self):
         calls = []
 
