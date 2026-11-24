@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
+from discussion_orchestration.models import ClarificationAnswer
+
 from .codec import CodecError, decode, encode
 from .errors import ApiError, decision_error_code, decision_status
 from .repository import DiscussionRepository, NotFound, VersionConflict, utcnow
@@ -144,6 +146,8 @@ class DiscussionService:
         substantive: bool,
         expected_state_version: int,
         input_version: int | None = None,
+        clarification_answers: tuple[dict[str, Any], ...] = (),
+        replaces_answer_seq: int | None = None,
         idempotency_key: str | None,
         request_hash: str,
         scope: str,
@@ -167,9 +171,15 @@ class DiscussionService:
         if reply_to_seq is not None:
             self._assert_local_reference(session_id, [reply_to_seq], meta)
 
-        decision = self.engine.note_user_input(
-            session, text, reply_to_seq=reply_to_seq, substantive=substantive
-        )
+        clarification = {}
+        if clarification_answers:
+            clarification["clarification_answers"] = tuple(
+                ClarificationAnswer(answer["question"], answer["answer"], tuple(answer["options"]))
+                for answer in clarification_answers)
+        if replaces_answer_seq is not None:
+            self._assert_local_reference(session_id, [replaces_answer_seq], meta)
+            clarification["replaces_answer_seq"] = replaces_answer_seq
+        decision = self.engine.note_user_input(session, text, reply_to_seq=reply_to_seq, substantive=substantive, **clarification)
         return self._commit(
             session,
             meta,
@@ -496,6 +506,37 @@ class DiscussionService:
     def _task_view(task: Any) -> dict[str, Any]:
         return encode(task)
 
+    @staticmethod
+    def _clarification(session: Any) -> dict[str, Any] | None:
+        if session.status.value != "clarifying" or session.waiting_for.value != "user_input":
+            return None
+        message = next((item for item in reversed(session.messages)
+                        if item.kind.value == "clarification" and item.input_version == session.input_version), None)
+        if message is None:
+            return None
+        questions = list(getattr(message, "clarification_questions", ()))
+        options = {}
+        if message.role.value == "reviewer":
+            review = next((item for item in reversed(session.reviews) if item.input_version == session.input_version), None)
+            if review is not None:
+                options = getattr(review, "question_options", {})
+                if not questions:
+                    legacy = next((finding.summary for finding in review.findings
+                                   if finding.finding_id == f"{review.review_id}:questions"), "")
+                    questions = legacy.split("；")
+        elif message.role.value == "host":
+            if not questions:
+                questions = message.text.removeprefix("需要用户补充关键事实：").split("；")
+            agenda = getattr(session, "agenda", None)
+            options = getattr(agenda, "question_options", {})
+        questions = list(dict.fromkeys(q.strip() for q in questions if q.strip()))
+        picks = {}
+        for question in questions:
+            entries = list(dict.fromkeys(option.strip() for option in options.get(question, ()) if option.strip()))
+            if len(entries) >= 4:
+                picks[question] = entries[:4]
+        return {"message_seq": message.seq, "questions": questions, "options": picks}
+
     def _render(self, session: Any, meta: Mapping[str, Any]) -> dict[str, Any]:
         draft = getattr(session, "current_draft", None)
         review_verdict = None
@@ -528,6 +569,11 @@ class DiscussionService:
             "waiting_for": getattr(session.waiting_for, "value", session.waiting_for),
             "last_seq": session.last_seq,
             "state_version": meta["state_version"],
+            "clarification": self._clarification(session),
+            "clarification_answers": {str(message.seq): encode(message.clarification_answers)
+                                      for message in session.messages if getattr(message, "clarification_answers", ())},
+            "superseded_answer_seqs": [message.replaces_answer_seq for message in session.messages
+                                       if getattr(message, "replaces_answer_seq", None) is not None],
             "participants": self._participants(session),
             "pending_tasks": [self._task_view(task) for task in getattr(session, "tasks", {}).values()],
             "agent_mode": self.agent_mode,

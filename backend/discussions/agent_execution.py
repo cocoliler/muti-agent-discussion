@@ -11,7 +11,7 @@ from spec_handoff.draft import DraftSpec
 
 from backend.roles.contracts import DraftSnapshot, PriorIssue, RoleRequest, SourceMessage
 from backend.roles.provider import DeepSeekProvider
-from backend.roles.runner import RoleRunner
+from backend.roles.runner import OUTPUT_CORRECTION_ROLES, RoleRunner
 from backend.roles.simulation import SimulationProvider
 from .errors import ApiError
 from .repository import VersionConflict
@@ -76,7 +76,7 @@ class AgentExecution:
         runner = RoleRunner(session_id, provider, mode=self.mode)
         while jobs:
             starts = [self._start(service, job) for job in jobs]
-            results = await asyncio.gather(*(runner.run(job.request, review_diagnostic=diagnostic)
+            results = await asyncio.gather(*(runner.run(job.request, validation_diagnostic=diagnostic)
                                              for job, (_, diagnostic) in zip(jobs, starts)), return_exceptions=True)
             failed = False
             for job, (number, _), result in zip(jobs, starts, results):
@@ -140,7 +140,10 @@ class AgentExecution:
         return self._jobs(session)
 
     def _jobs(self, session) -> list[Job]:
-        user_messages = [m for m in session.messages if m.kind == MessageKind.USER_INPUT and m.text.strip()]
+        replaced = {m.replaces_answer_seq for m in session.messages if m.replaces_answer_seq is not None}
+        history = [m for m in session.messages if m.seq not in replaced
+                   and (not replaced or m.role == Role.USER or m.input_version == session.input_version)]
+        user_messages = [m for m in history if m.kind == MessageKind.USER_INPUT and m.text.strip()]
         if not user_messages:
             return []
         idea = "\n".join(m.text for m in user_messages)
@@ -150,14 +153,14 @@ class AgentExecution:
         topic = f"{item.title}｜{item.question}" if item else None
         draft = session.current_draft
         if session.status == SessionStatus.REVIEWING and session.waiting_for == WaitingFor.REVIEW and draft:
-            return [self._job(session, session.messages, idea, "reviewer", "review", session.topic_id or "T1",
+            return [self._job(session, history, idea, "reviewer", "review", session.topic_id or "T1",
                               topic=topic, draft=draft, issues=self._review_issues(session, draft.parent_id))]
         if session.status != SessionStatus.DISCUSSING or session.waiting_for != WaitingFor.ROLE_RESULTS:
             return []
         jobs = []
         for task in session.tasks.values():
             all_messages = task.kind in (TaskKind.INTEGRATION, TaskKind.DRAFT)
-            messages = session.messages if all_messages else [m for m in session.messages if m.seq in task.message_seqs]
+            messages = history if all_messages else [m for m in history if m.seq in task.message_seqs]
             issues = self._review_issues(session, draft.draft_id) if all_messages and draft else []
             if task.kind == TaskKind.RESPONSE:
                 issues = [self._prior_issue(session, session.issues[issue_id], task.role.value) for issue_id in task.issue_ids
@@ -214,7 +217,8 @@ class AgentExecution:
         if job.kind == "review":
             payload = {"review_id": request.logical_task_id, "session_id": request.session_id,
                        "draft_id": output["draft_id"], "input_version": request.input_version,
-                       "verdict": output["verdict"].lower(), "findings": [
+                       "verdict": output["verdict"].lower(), "questions": output["questions"],
+                       "question_options": output.get("question_options", {}), "findings": [
                            {"finding_id": finding["issue_id"], "issue_id": finding["issue_id"],
                             "severity": "blocking" if finding["severity"] == "blocking" else "major",
                             "target_item": finding["target_item"], "summary": finding["description"],
@@ -223,16 +227,12 @@ class AgentExecution:
                             if finding["owner_role"] != "scribe" else "product"}
                            for finding in output["findings"] if finding["status"] == "open"
                        ]}
-            if output["verdict"] == "NEEDS_INPUT" and output["questions"]:
-                payload["findings"].append({"finding_id": f"{request.logical_task_id}:questions", "severity": "blocking",
-                                             "target_item": "background", "summary": "；".join(output["questions"]),
-                                             "close_condition": "由用户补充信息"})
             action = "submit_review"
         elif task is None:
             payload = {"summary": output["text"], "items": [{"topic_id": request.topic_id,
                        "title": request.user_input.splitlines()[0][:80],
                        "question": "首版应该解决哪些用户需求与关键约束？"}],
-                       "missing_facts": output["questions"]}
+                       "missing_facts": output["questions"], "question_options": output.get("question_options", {})}
             action = "submit_agenda"
         else:
             payload = {"task_id": task.task_id, "session_id": task.session_id, "role": job.role, "kind": job.kind,
@@ -300,7 +300,8 @@ class AgentExecution:
         previous = max(existing, key=lambda row: row["attempt_no"], default=None)
         number = previous["attempt_no"] + 1 if previous else 1
         diagnostic = None
-        if (previous and job.kind == "review" and previous["input_version"] == job.request.input_version
+        if (previous and job.request.role in OUTPUT_CORRECTION_ROLES
+                and previous["input_version"] == job.request.input_version
                 and previous["snapshot_ref"] == job.snapshot_ref):
             error = previous["error"] or {}
             if error.get("code") == "invalid_output":

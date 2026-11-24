@@ -1,3 +1,5 @@
+export type ClarificationAnswer = { question: string; answer: string; options: string[] };
+
 export type Message = {
   seq: number;
   role: string;
@@ -7,6 +9,7 @@ export type Message = {
   source_seqs: number[];
   item_refs: string[];
   issue_ids: string[];
+  input_version?: number;
   task_id?: string | null;
 };
 
@@ -39,6 +42,9 @@ export type Session = {
   status: string;
   input_version: number;
   state_version: number;
+  clarification?: { message_seq: number; questions: string[]; options?: Record<string, string[]> } | null;
+  clarification_answers?: Record<string, ClarificationAnswer[]>;
+  superseded_answer_seqs?: number[];
   round_no: number;
   round_kind: string | null;
   phase: string | null;

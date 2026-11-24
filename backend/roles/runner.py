@@ -13,6 +13,9 @@ from .contracts import Finding, OUTPUT_MODELS, RoleRequest, RoleRuleError, build
 from .provider import Completion, ProviderError
 
 
+OUTPUT_CORRECTION_ROLES = frozenset({"scribe", "reviewer"})
+
+
 class Provider(Protocol):
     async def complete(self, request: RoleRequest, messages: list[dict]) -> Completion: ...
 
@@ -65,7 +68,7 @@ class RoleRunner:
             raise ValueError("extra_calls must be a positive integer")
         self.call_limit += extra_calls
 
-    async def run(self, request: RoleRequest, *, review_diagnostic: str | None = None) -> RoleResult:
+    async def run(self, request: RoleRequest, *, validation_diagnostic: str | None = None) -> RoleResult:
         if request.session_id != self.session_id:
             raise ValueError("request belongs to a different discussion")
         request = request.model_copy(deep=True)
@@ -86,8 +89,11 @@ class RoleRunner:
             if previous.error != "call_limit" or self.calls_used >= self.call_limit:
                 return previous.model_copy(deep=True)
             result = previous.model_copy(deep=True)
+            if previous.attempts and previous.attempts[-1].error == "invalid_output":
+                validation_diagnostic = previous.attempts[-1].diagnostic
 
         messages = build_messages(request)
+        can_correct_output = request.role in OUTPUT_CORRECTION_ROLES
         self._active.add(task_id)
         try:
             for number in range(len(result.attempts) + 1, 3):
@@ -104,10 +110,10 @@ class RoleRunner:
                 try:
                     async with asyncio.timeout(self.timeout_seconds):
                         prompt = messages
-                        if request.role == "reviewer" and review_diagnostic:
+                        if can_correct_output and validation_diagnostic:
                             # 反馈仅包含服务端校验诊断，原任务快照和冻结稿保持一致。
                             feedback = {"role": "user", "content": json.dumps(
-                                {"previous_validation_error": review_diagnostic}, ensure_ascii=False)}
+                                {"previous_validation_error": validation_diagnostic}, ensure_ascii=False)}
                             prompt = [messages[0], feedback, messages[1]]
                         response = await self.provider.complete(request, prompt)
                     usage = response.usage
@@ -149,8 +155,8 @@ class RoleRunner:
                     result.attempts.append(Attempt(attempt_no=number, status=status, elapsed_seconds=monotonic() - start,
                                                    usage=usage, error=error, diagnostic=diagnostic))
                     result.error = error
-                if error == "invalid_output" and request.role == "reviewer":
-                    review_diagnostic = diagnostic
+                if error == "invalid_output" and can_correct_output:
+                    validation_diagnostic = diagnostic
                     retryable = self.calls_used < self.call_limit
                 if not retryable or number == 2:
                     break

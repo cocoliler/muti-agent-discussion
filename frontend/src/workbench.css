@@ -60,6 +60,25 @@
 .task-metadata dt { color: var(--muted); }
 .task-metadata dd { margin: 0; overflow-wrap: anywhere; }
 .task-dialog h3 { margin-top: 15px; font-size: 14px; }
+.clarification-card { margin-block: 18px 8px; padding: 16px 18px 12px; border: 1px solid var(--border); border-radius: 12px; background: #f7f8f2; }
+.message-body .clarification-card { margin-block: 10px 0; padding: 12px; }
+.workbench-shell .message-edit { flex-shrink: 0; padding: 3px 7px; color: var(--accent); font-size: 12px; }
+.clarification-card h2 { font-size: 16px; margin-bottom: 14px; }
+.clarification-edit-note { margin: -5px 0 14px; color: var(--muted); font-size: 13px; }
+.clarification-form { gap: 14px; }
+.clarification-questions { display: grid; gap: 14px; }
+.clarification-options { display: grid; gap: 2px; min-width: 0; padding: 0 0 12px; margin: 0; border: 0; border-bottom: 1px solid var(--border); }
+.clarification-options:last-child { padding-bottom: 0; border-bottom: 0; }
+.clarification-options legend { padding: 0; margin-bottom: 6px; font-size: 14px; font-weight: 650; line-height: 1.5; overflow-wrap: anywhere; }
+.workbench-shell .clarification-option { display: flex; align-items: start; gap: 8px; padding: 5px 6px; color: var(--ink); line-height: 1.5; border-radius: 5px; cursor: pointer; }
+.clarification-option:hover { background: #eeefe9; }
+.clarification-option:has(input:checked) { background: #e1eee2; }
+.clarification-option input { width: 14px; height: 14px; margin: 3px 0 0; flex: 0 0 14px; accent-color: #255c48; }
+.clarification-option > span { overflow-wrap: anywhere; }
+.clarification-recommended { align-self: start; padding: 1px 5px; color: var(--accent); font-size: 11px; white-space: nowrap; background: #e8eee4; border-radius: 4px; }
+.clarification-options textarea { margin-top: 5px; }
+.clarification-actions { justify-content: flex-end; }
+.clarification-form .clarification-error { margin: 0; color: #8d3238; font-size: 13px; }
 .task-message-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; }
 .task-message-list button { display: flex; gap: 8px; width: 100%; text-align: left; font-size: 13px; }
 .task-message-list button > :first-child { color: var(--accent); flex-shrink: 0; }
@@ -79,6 +98,12 @@
 .workbench-shell summary { color: var(--accent); font-size: 13px; cursor: pointer; }
 .workbench-shell .message { border-color: var(--border); padding: 16px 0; }
 .workbench-shell .message-body p { color: var(--ink); }
+.discussion-message-text { display: grid; gap: 12px; margin-top: 7px; max-width: 670px; color: var(--ink); font-size: 14px; line-height: 1.7; }
+.discussion-message-text h3 { font-size: 14px; font-weight: 700; color: var(--accent); margin-bottom: 3px; }
+.workbench-shell .discussion-message-text p { margin: 0 0 6px; line-height: inherit; white-space: normal; }
+.discussion-message-text ul, .discussion-message-text ol { margin: 4px 0 6px; padding-inline-start: 20px; }
+.discussion-message-text li { padding-inline-start: 2px; overflow-wrap: anywhere; }
+.discussion-message-text li + li { margin-top: 2px; }
 .workbench-shell .avatar { color: #2d5846 !important; }
 .workbench-shell .event-label { background: #eef1e9; color: #4d6054; }
 .workbench-shell .references button { background: #f5f7f0; color: var(--accent); }
@@ -92,7 +117,7 @@
 .agenda-form { margin: 14px 0 0 36px; }
 .agenda-preview { white-space: pre-wrap; overflow-wrap: anywhere; }
 .workbench-shell .workbench-controls { background: #fbfcf8; scrollbar-color: #bdcbbd transparent; }
-.workbench-shell .live-form input:not([type='checkbox']), .workbench-shell .live-form textarea, .workbench-shell .live-form select {
+.workbench-shell .live-form input:not([type='checkbox'], [type='radio']), .workbench-shell .live-form textarea, .workbench-shell .live-form select {
   border-color: #cfd9cd;
   color: var(--ink);
   background: var(--surface);

@@ -14,7 +14,7 @@ def _field(text, labels):
 
 
 def _goal(req):
-    return _field(req.user_input, "目标|goal") or req.user_input.strip()[:120]
+    return _field(req.user_input, "目标|goal") or req.user_input.strip().splitlines()[0][:120]
 
 
 def _latest(req, roles):
@@ -94,6 +94,11 @@ def _critic(req):
 
 def _audience(text):
     field = _field(text, "目标用户|用户|users|target users")
+    if not field:
+        answer = re.search(r"(?:^|\n)\d+\. [^\n]*由谁使用[？?]\n回答[：:][ \t]*([^\n]+)", text)
+        if answer:
+            value = answer[1].strip()
+            field = (_field(value, "目标用户|用户|users|target users") or value) if value != "待确认" else ""
     return [s.strip() for s in re.split(r"[、,，]", field) if s.strip()][:20]
 
 

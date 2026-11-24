@@ -31,6 +31,7 @@ from .enums import (
     WaitingFor,
 )
 from .models import (
+    ClarificationAnswer,
     DiscussionLimits,
     DiscussionSession,
     Decision,
@@ -90,6 +91,8 @@ class DiscussionEngine:
         *,
         reply_to_seq: int | None = None,
         substantive: bool = True,
+        clarification_answers: tuple[ClarificationAnswer, ...] = (),
+        replaces_answer_seq: int | None = None,
     ) -> Decision:
         """记录用户输入。实质补充升级输入版本并作废在途结果。"""
 
@@ -106,12 +109,24 @@ class DiscussionEngine:
             if problem:
                 return self._reject(session, problem[0], problem[1])
 
+        if clarification_answers or replaces_answer_seq is not None:
+            prompt = next((item for item in session.messages if item.seq == reply_to_seq), None)
+            if not substantive or prompt is None or prompt.kind != MessageKind.CLARIFICATION:
+                return self._reject(session, ReasonCode.ILLEGAL_REPLY_TARGET, "回答需关联原澄清问题")
+            if replaces_answer_seq is not None:
+                previous = next((item for item in reversed(session.messages)
+                                 if item.kind == MessageKind.USER_INPUT and item.reply_to_seq == prompt.seq), None)
+                if previous is None or previous.seq != replaces_answer_seq:
+                    return self._reject(session, ReasonCode.ILLEGAL_REPLY_TARGET, "请打开该问题的最新回答重新填写")
+
         self._append(
             session,
             Role.USER,
             MessageKind.USER_INPUT,
             text,
             reply_to_seq=reply_to_seq,
+            clarification_answers=clarification_answers,
+            replaces_answer_seq=replaces_answer_seq,
         )
         if not substantive:
             return self._result(
@@ -221,6 +236,7 @@ class DiscussionEngine:
                 MessageKind.CLARIFICATION,
                 f"需要用户补充关键事实：{questions}",
                 topic_id=lead.topic_id,
+                clarification_questions=agenda.missing_facts,
             )
             session.waiting_for = WaitingFor.USER_INPUT
             return self._result(
@@ -330,6 +346,7 @@ class DiscussionEngine:
             MessageKind.CLARIFICATION,
             "；".join(questions),
             issue_ids=issue_ids,
+            clarification_questions=questions,
         )
         session.waiting_for = WaitingFor.USER_INPUT
         return self._result(
@@ -571,13 +588,14 @@ class DiscussionEngine:
             session.round_kind = None
             session.phase = None
             session.round_challenged = False
-            questions = "；".join(f.summary for f in review.findings) or "需要补充关键事实"
+            questions = "；".join(review.questions or tuple(f.summary for f in review.findings)) or "需要补充关键事实"
             self._append(
                 session,
                 Role.REVIEWER,
                 MessageKind.CLARIFICATION,
                 f"需要用户补充：{questions}",
                 item_refs=tuple(f.target_item for f in review.findings),
+                clarification_questions=review.questions,
             )
             return self._result(
                 session,
@@ -1174,6 +1192,9 @@ class DiscussionEngine:
         item_refs: tuple[str, ...] = (),
         issue_ids: tuple[str, ...] = (),
         task_id: str | None = None,
+        clarification_questions: tuple[str, ...] = (),
+        clarification_answers: tuple[ClarificationAnswer, ...] = (),
+        replaces_answer_seq: int | None = None,
     ) -> Message:
         message = Message(
             seq=session.next_seq(),
@@ -1188,6 +1209,9 @@ class DiscussionEngine:
             item_refs=tuple(item_refs),
             issue_ids=tuple(issue_ids),
             task_id=task_id,
+            clarification_questions=clarification_questions,
+            clarification_answers=clarification_answers,
+            replaces_answer_seq=replaces_answer_seq,
         )
         session.messages.append(message)
         return message

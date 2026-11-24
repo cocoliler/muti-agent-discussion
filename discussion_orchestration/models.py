@@ -67,12 +67,20 @@ class Agenda:
     summary: str
     items: tuple[AgendaItem, ...]
     missing_facts: tuple[str, ...] = ()
+    question_options: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def item(self, topic_id: str) -> AgendaItem:
         for item in self.items:
             if item.topic_id == topic_id:
                 return item
         raise KeyError(topic_id)
+
+
+@dataclass(frozen=True)
+class ClarificationAnswer:
+    question: str
+    answer: str
+    options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -91,6 +99,9 @@ class Message:
     item_refs: tuple[str, ...] = ()
     task_id: str | None = None
     issue_ids: tuple[str, ...] = ()
+    clarification_questions: tuple[str, ...] = ()
+    clarification_answers: tuple[ClarificationAnswer, ...] = ()
+    replaces_answer_seq: int | None = None
 
 
 @dataclass
@@ -175,6 +186,8 @@ class ReviewResult:
     input_version: int
     verdict: Verdict
     findings: tuple[ReviewFinding, ...] = ()
+    questions: tuple[str, ...] = ()
+    question_options: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass

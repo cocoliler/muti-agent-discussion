@@ -107,7 +107,7 @@ h1, h2, h3, p { margin: 0; }
 
 .live-form { display: grid; gap: 10px; }
 .live-form label { display: grid; gap: 5px; color: var(--muted); font-size: 13px; }
-.live-form input:not([type="checkbox"]), .live-form textarea, .live-form select {
+.live-form input:not([type="checkbox"], [type="radio"]), .live-form textarea, .live-form select {
   width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid #383b54;
   border-radius: 7px; background: #151622; color: #eeeefa; font: inherit;
 }

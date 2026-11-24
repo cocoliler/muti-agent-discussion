@@ -44,9 +44,17 @@ class CreateDiscussionRequest(_Strict):
     limits: LimitsModel | None = None
 
 
+class ClarificationAnswerModel(_Strict):
+    question: str = Field(min_length=1, max_length=8000)
+    answer: str = Field(min_length=1, max_length=8000)
+    options: list[str] = Field(default_factory=list, max_length=4)
+
+
 class PostMessageRequest(_Strict):
     text: str = Field(min_length=1, max_length=8000)
     reply_to_seq: int | None = Field(default=None, ge=1)
+    clarification_answers: list[ClarificationAnswerModel] = Field(default_factory=list, max_length=50)
+    replaces_answer_seq: int | None = Field(default=None, ge=1)
     substantive: bool = True
     #: 客户端看到的上下文版本（§6「接收上下文版本」）；缺省视为不校验
     input_version: int | None = Field(default=None, ge=1)
@@ -78,6 +86,9 @@ class MessageView(_Strict):
     source_seqs: list[int] = Field(default_factory=list)
     item_refs: list[str] = Field(default_factory=list)
     issue_ids: list[str] = Field(default_factory=list)
+    clarification_questions: list[str] = Field(default_factory=list)
+    clarification_answers: list[ClarificationAnswerModel] = Field(default_factory=list)
+    replaces_answer_seq: int | None = None
     input_version: int
     round_no: int
     created_at: str | None = None
@@ -124,6 +135,12 @@ class DecisionView(_Strict):
     seq: int | None = None
 
 
+class ClarificationView(_Strict):
+    message_seq: int
+    questions: list[str] = Field(default_factory=list)
+    options: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class SessionView(_Strict):
     id: str
     project_id: str
@@ -136,6 +153,9 @@ class SessionView(_Strict):
     waiting_for: str
     last_seq: int
     state_version: int
+    clarification: ClarificationView | None = None
+    clarification_answers: dict[int, list[ClarificationAnswerModel]] = Field(default_factory=dict)
+    superseded_answer_seqs: list[int] = Field(default_factory=list)
     participants: list[ParticipantView] = Field(default_factory=list)
     pending_tasks: list[dict[str, Any]] = Field(default_factory=list)
     agent_mode: str = "simulation"

@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, api, discussionPath, readMessages } from './discussions';
-import type { Action, Decision, Draft, Finding, Handoff, Message, Session, Task } from './discussions';
+import type { Action, ClarificationAnswer, Decision, Draft, Finding, Handoff, Message, Session, Task } from './discussions';
 import { DiscussionSpec } from './DiscussionSpec';
+import { ClarificationForm } from './ClarificationForm';
+import { DiscussionMessageText } from './DiscussionMessageText';
 import './workbench.css';
 
 const statusLabels: Record<string, string> = {
@@ -62,6 +64,14 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : '无法连接讨论服务。';
 }
 
+function previousAnswers(text: string): ClarificationAnswer[] {
+  const parts = text.trim().split(/\n\n(?=\d+\. )/);
+  const parsed = parts.map((part) => /^\d+\. (.+?)\n回答：([\s\S]+)$/s.exec(part));
+  return parsed.every((part) => part?.[1].trim() && part[2].trim())
+    ? parsed.map((part) => ({ question: part![1].trim(), answer: part![2].trim(), options: [] }))
+    : [{ question: '你想补充什么？', answer: text, options: [] }];
+}
+
 export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [id, setId] = useState(() => readStorage(storageKey));
   const [projectId, setProjectId] = useState(() => readStorage(projectKey) ?? crypto.randomUUID());
@@ -82,6 +92,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [error, setError] = useState('');
   const [readError, setReadError] = useState('');
   const [findings, setFindings] = useState<Finding[]>([]);
+  const [answerToEdit, setAnswerToEdit] = useState<number | null>(null);
   const [action, setAction] = useState<Action | ''>('');
   const [payload, setPayload] = useState('');
   const [selectedIssues, setSelectedIssues] = useState<string[]>([]);
@@ -89,7 +100,6 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [note, setNote] = useState('');
   const [agendaDraft, setAgendaDraft] = useState<{ version: number; text: string } | null>(null);
   const thread = useRef<HTMLDivElement>(null);
-  const composer = useRef<HTMLTextAreaElement>(null);
   const projectIdeaField = useRef<HTMLTextAreaElement>(null);
   const sessionRead = useRef<AbortController | null>(null);
   const shouldScroll = useRef(true);
@@ -141,7 +151,12 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   }, [session?.active_draft]);
 
   useEffect(() => {
-    if (thread.current && shouldScroll.current) thread.current.scrollTop = thread.current.scrollHeight;
+    const list = thread.current;
+    if (!list || !shouldScroll.current) return;
+    const clarification = list.querySelector(':scope > .clarification-card:not([hidden])');
+    list.scrollTop = clarification
+      ? list.scrollTop + clarification.getBoundingClientRect().top - list.getBoundingClientRect().top - 12
+      : list.scrollHeight;
   }, [messages.length]);
 
   useEffect(() => {
@@ -161,6 +176,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     setError('');
     setReadError('');
     setFindings([]);
+    setAnswerToEdit(null);
     setIdea('');
     setText('');
     setReply(null);
@@ -256,6 +272,27 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
 
   const terminal = session?.status === 'completed' || session?.status === 'canceled';
   const paused = session?.status === 'paused';
+  const supersededAnswers = new Set(session?.superseded_answer_seqs ?? []);
+  const promptsBySeq = new Set(messages.filter((message) => message.kind === 'clarification').map((message) => message.seq));
+  const latestAnswers = new Map<number, Message>();
+  for (const message of messages) {
+    if (message.role === 'user' && message.kind === 'user_input' && message.reply_to_seq !== null
+        && promptsBySeq.has(message.reply_to_seq)) latestAnswers.set(message.reply_to_seq, message);
+  }
+  const editableAnswers = session?.superseded_answer_seqs && !terminal && !paused
+    ? [...latestAnswers.values()].filter((message) => !supersededAnswers.has(message.seq)) : [];
+  const editMessage = editableAnswers.find((message) => message.seq === answerToEdit);
+  const editAnswers = editMessage ? session?.clarification_answers?.[editMessage.seq] ?? previousAnswers(editMessage.text) : [];
+
+  function reanswer(seq: number) {
+    setError('');
+    setAnswerToEdit(seq);
+    requestAnimationFrame(() => {
+      const heading = document.querySelector<HTMLElement>('#clarification-edit h2');
+      heading?.focus({ preventScroll: true });
+      heading?.scrollIntoView({ block: 'nearest' });
+    });
+  }
   const currentTasks = session ? (session.pending_tasks ?? tasks).filter((task) => task.input_version === session.input_version && task.round_no === session.round_no) : [];
   const selectedTask = taskSelection?.task;
   const selectedPerson = session?.participants.find((person) => person.role === taskSelection?.role);
@@ -267,6 +304,16 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const activeDraft = session?.active_draft;
   const canConfirm = session?.status === 'awaiting_confirmation' && activeDraft?.review_verdict === 'pass'
     && activeDraft.input_version === session.input_version;
+  const awaitingClarification = session?.status === 'clarifying' && session.waiting_for === 'user_input';
+  const clarificationMessage = awaitingClarification ? messages.filter((message) => message.kind === 'clarification'
+    && (message.input_version === undefined || message.input_version === session.input_version)).at(-1) : undefined;
+  const legacyReview = session?.reviews.at(-1);
+  const legacyQuestions = clarificationMessage?.role === 'reviewer' && legacyReview?.verdict === 'needs_input'
+    ? legacyReview.findings.find((finding) => finding.finding_id === `${legacyReview.review_id}:questions`)?.summary
+    : clarificationMessage?.role === 'host' ? clarificationMessage.text.replace(/^需要用户补充关键事实：/, '') : undefined;
+  const clarificationQuestions = session?.clarification?.questions ?? legacyQuestions?.split('；').map((part) => part.trim()).filter(Boolean) ?? [];
+  const clarificationSeq = session?.clarification?.message_seq ?? clarificationMessage?.seq ?? null;
+  const clarificationKey = awaitingClarification ? `${session.id}:${session.input_version}:${clarificationSeq ?? 0}` : null;
   const hostWorking = session?.participants.some((person) => person.role === 'host' && person.status === 'running');
   const waitingForAgenda = session?.waiting_for === 'host_agenda' && !paused;
   const agentsEnabled = session?.agent_mode === 'simulation' || session?.agent_mode === 'real';
@@ -381,14 +428,29 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
           {id ? messages.map((message) => <article key={message.seq} id={`message-${message.seq}`} tabIndex={-1}
             className={`message${highlight === message.seq ? ' highlight' : ''}`}>
             <Avatar role={message.role} /><div className="message-body"><header><strong>{roleLabels[message.role] ?? message.role}</strong>
-              <span className="event-label">{kindLabels[message.kind] ?? message.kind}</span><span className="sequence">#{message.seq}</span></header>
-              <p>{message.text}</p><div className="references">
+              <span className="event-label">{supersededAnswers.has(message.seq) ? '答案已替换' : kindLabels[message.kind] ?? message.kind}</span><span className="sequence">#{message.seq}</span>
+              {editableAnswers.includes(message) && editMessage !== message && <button className="message-edit" disabled={busy}
+                onClick={() => reanswer(message.seq)}>修改回答</button>}
+            </header>
+              {session && editMessage === message ? <ClarificationForm
+                questions={editAnswers.map((answer) => answer.question)} initialAnswers={editAnswers}
+                options={Object.fromEntries(editAnswers.map((answer) => [answer.question, answer.options]))} busy={busy} error={error}
+                onCancel={() => {
+                  setError('');
+                  setAnswerToEdit(null);
+                  requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`#message-${message.seq} .message-edit`)?.focus());
+                }}
+                onSubmit={(text, answers) => command('/messages', {
+                  text, reply_to_seq: message.reply_to_seq, replaces_answer_seq: message.seq,
+                  clarification_answers: answers, substantive: true, input_version: session.input_version,
+                }, () => { setAnswerToEdit(null); shouldScroll.current = true; })} />
+              : <><DiscussionMessageText text={message.text} formatted={message.role !== 'user' && message.kind !== 'system'} /><div className="references">
                 {[...new Set([...(message.source_seqs ?? []), ...(message.reply_to_seq ? [message.reply_to_seq] : [])])].map((seq) =>
                   <button key={seq} onClick={() => locate(seq)} aria-label={`定位消息 ${seq}`}>#{seq}</button>)}
                 {message.item_refs?.map((item) => <button key={item} onClick={() => setItemRef({ value: item })}>{item}</button>)}
                 {message.issue_ids?.map((issue) => <span key={issue}>{issue}</span>)}
                 {session && !terminal && !paused && <button onClick={() => setReply(message.seq)}>回复 #{message.seq}</button>}
-              </div>
+              </div></>}
             </div></article>) : <form className="welcome live-form" onSubmit={(event) => { event.preventDefault(); create(); }}>
             <h2>你想做什么产品？</h2>
             <label>项目想法<textarea ref={projectIdeaField} required maxLength={4000} rows={4} placeholder="例如：做一个内部会议室预约工具，首版支持查空闲和预约。" value={idea} onChange={(event) => setIdea(event.target.value)} /></label>
@@ -396,7 +458,13 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
             <button className="primary" disabled={busy || !idea.trim() || !projectId.trim()}>创建讨论</button>
           </form>}
           {id && !session && !readError && <p role="status">正在恢复讨论…</p>}
-          {session && nextStep && <section className="next-step" aria-labelledby="next-step-title">
+          {session && clarificationKey && <ClarificationForm key={clarificationKey}
+            questions={clarificationQuestions} options={session.clarification?.options} busy={busy} error={error} hidden={!!editMessage}
+            onSubmit={(answer, answers) => command('/messages', {
+              text: answer, reply_to_seq: clarificationSeq, substantive: true, input_version: session.input_version,
+              ...(session.superseded_answer_seqs && clarificationSeq ? { clarification_answers: answers } : {}),
+            })} />}
+          {session && nextStep && !clarificationKey && !editMessage && <section className="next-step" aria-labelledby="next-step-title">
             <div className="next-step-heading"><span className="step-symbol" aria-hidden="true">{terminal ? '✓' : '↳'}</span><div>
               <h2 id="next-step-title" role="status">{nextStep}</h2>
               {agentsEnabled && (waitingForAgenda || autoExchange) && <p>{session.agent_mode === 'simulation' ? '模拟 Agent' : '模型 Agent'}生成的发言会自动显示在讨论中。</p>}
@@ -405,7 +473,6 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
               {session.waiting_for === 'role_results' && !paused && !autoExchange && <p>收到角色结果后，会显示在讨论中。</p>}
             </div></div>
             {!paused && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent ? '重试 Agent' : '继续执行 Agent'}</button>}
-            {session.waiting_for === 'user_input' && !paused && !terminal && <button onClick={() => composer.current?.focus()}>补充信息</button>}
             {canConfirm && <a href="#live-spec-title">查看待签收规格</a>}
             {waitingForAgenda && !agentsEnabled && <form className="live-form agenda-form" onSubmit={(event) => {
               event.preventDefault();
@@ -423,8 +490,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
             </form>}
           </section>}
         </div>
-        {(error || readError) && <div className="error workbench-error" role="alert">
-          {error && <p>{error}</p>}{readError && <p>{readError} {id && <button onClick={() => void refresh.current()}>重新读取</button>}</p>}
+        {((error && !clarificationKey && !editMessage) || readError || findings.length > 0) && <div className="error workbench-error" role="alert">
+          {error && !clarificationKey && !editMessage && <p>{error}</p>}{readError && <p>{readError} {id && <button onClick={() => void refresh.current()}>重新读取</button>}</p>}
           {findings.length > 0 && <ul>{findings.map((finding, index) => <li key={index}>
             {finding.path ? <button onClick={() => setItemRef({ value: finding.path! })}>{finding.path}</button> : finding.code} {finding.message}
           </li>)}</ul>}
@@ -435,7 +502,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
             command('/messages', { text: text.trim(), reply_to_seq: reply, substantive, input_version: session.input_version }, () => { setText(''); setReply(null); });
           }}>
             {reply !== null && <div className="action-row"><button type="button" onClick={() => locate(reply)}>回复 #{reply}</button><button type="button" onClick={() => setReply(null)}>取消回复</button></div>}
-            <label>{session.waiting_for === 'user_input' ? '补充信息' : '讨论消息'}<textarea ref={composer} rows={2} required maxLength={8000} value={text} onChange={(event) => setText(event.target.value)} /></label>
+            <label>讨论消息<textarea rows={2} required maxLength={8000} value={text} onChange={(event) => setText(event.target.value)} /></label>
             <div className="action-row spread"><label className="check"><input type="checkbox" checked={substantive} onChange={(event) => setSubstantive(event.target.checked)} /> 更新需求上下文</label>
               <button className="primary" disabled={busy || !text.trim()}>发送</button></div>
           </form>}

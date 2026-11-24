@@ -186,6 +186,9 @@ def create_router(
             sid,
             text=body.text,
             reply_to_seq=body.reply_to_seq,
+            **({"clarification_answers": tuple(answer.model_dump() for answer in body.clarification_answers)}
+               if body.clarification_answers else {}),
+            **({"replaces_answer_seq": body.replaces_answer_seq} if body.replaces_answer_seq is not None else {}),
             substantive=body.substantive,
             expected_state_version=body.expected_state_version,
             input_version=body.input_version,
