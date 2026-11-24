@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
 from jsonschema import Draft202012Validator
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, ValidationInfo, model_validator
 
 
 Specialist = Literal["product", "research", "architect", "designer", "market"]
@@ -201,9 +201,21 @@ class ScribeOutput(RoleOutput):
     requirement_changes: list[RequirementChange] = Field(default_factory=list)
 
 
+HISTORICAL_FINDING_FIELDS = {"target_item", "severity", "closure_condition"}
+
+
 class Finding(Issue):
     status: Literal["open", "closed"]
     source_seqs: Annotated[Seqs, Field(min_length=1)]
+
+    @model_validator(mode="before")
+    @classmethod
+    def keep_original_criteria(cls, value: Any, info: ValidationInfo) -> Any:
+        if isinstance(value, dict) and isinstance(issue_id := value.get("issue_id"), str):
+            original = (info.context or {}).get("prior_issues", {}).get(issue_id.strip())
+            if original is not None:
+                return {**value, **original.model_dump(include=HISTORICAL_FINDING_FIELDS)}
+        return value
 
 
 class ReviewOutput(RoleOutput):
@@ -231,7 +243,7 @@ ROLE_INSTRUCTIONS = {
     "market": "你是商业与市场分析师。涉及竞品、定价、需求规模时注明依据。缺少来源的判断标为 assumption。内部项目可用 not_applicable 并在 text 解释理由。",
     "critic": "你是质疑者。引用至少一条提供的用户输入消息或具体发言，指出反例、遗漏或潜在故障，点名可回应的专业角色并给出验证方法。",
     "scribe": "你是记录员。整理共识、备选项、分歧、假设及风险；逐条列明需求的消息依据。已确认的假设才写入正式正文。普通改写沿用需求 ID，删除、合并、拆分在 requirement_changes 给出原 ID、去向和理由；整改项应落实到可观察验收条件。",
-    "reviewer": "你是独立评审。仅评审所给冻结稿，逐项检查范围、证据、体验、技术约束、风险与可观察验收。目标使用现有需求 ID 或顶层正文字段。每个发现给出稳定 ID、严重度、依据、负责角色和关闭条件。逐项复核上轮问题，关闭时在 description 说明整改及复核结果并引用证据。PASS 不得留有阻断；REVISE 指出待修项；NEEDS_INPUT 指明阻断项并提出用户可回答的问题。",
+    "reviewer": "你是独立评审。仅评审所给冻结稿，逐项检查范围、证据、体验、技术约束、风险与可观察验收。目标使用现有需求 ID 或顶层正文字段。新发现给出稳定 ID、严重度、依据、负责角色和关闭条件。逐项复核上轮问题，关闭时在 description 说明整改及复核结果并引用证据。PASS 不得留有阻断；REVISE 指出待修项；NEEDS_INPUT 指明阻断项并提出用户可回答的问题。",
 }
 
 
@@ -258,9 +270,11 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
         instructions.append("content 必须符合此 FlowStudio Schema：" + json.dumps(SPEC_SCHEMA, ensure_ascii=False))
     if role == "reviewer":
         instructions.append(
-            "draft_id 原样复制 draft.id；target_item 只用 draft.source_map 的需求 ID 或 draft.content 的顶层字段名。"
-            "每个 finding 的 source_seqs 至少填一个当前 messages 中的整数 seq，severity 仅 blocking/advisory。"
-            "新发现用 open。issues 中的历史项逐项沿用 issue_id、target_item、severity 和 closure_condition。"
+            "draft_id 原样复制 draft.id。每个 finding 的 source_seqs 至少填一个当前 messages 中的整数 seq。"
+            "新发现用 open，必须填写 target_item、severity 和可验证的 closure_condition。"
+            "新发现的 target_item 只用 draft.source_map 的需求 ID 或 draft.content 的顶层字段名，severity 仅 blocking/advisory。"
+            "历史项逐项沿用 issues 中的 issue_id，按原关闭条件判断状态，在 description 说明复核结果，并用 source_seqs 引用依据。"
+            "历史项省略 target_item、severity 和 closure_condition，由服务端沿用原值。若目标已从新版草稿移除，复核移除是否解决了原问题。"
             "只有本次输入 issues 数组中的 issue_id 可以标 closed。讨论原文中提到的风险或已解决事项"
             "不能当作已登记的评审发现；issues 为空时不得输出 closed 项。"
             "PASS 不可含开放阻断项；REVISE 至少含一个开放项。这两种结论的 questions 都填 []。"
@@ -272,7 +286,11 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
             "如需用户答题，在 question_options 中用每条 questions 的原文作键。每题提供四个简短、不同、贴合需求且可直接提交的答案建议。"
             "勿把未经用户选择的建议写成已确认事实，也勿加入自由填写选项，界面会自动提供。没有问题时用空对象。"
         )
-    instructions.append(json.dumps(OUTPUT_MODELS[role].model_json_schema(), ensure_ascii=False))
+    output_schema = OUTPUT_MODELS[role].model_json_schema()
+    if role == "reviewer" and request.issues:
+        finding_schema = output_schema["$defs"]["Finding"]
+        finding_schema["required"] = [field for field in finding_schema["required"] if field not in HISTORICAL_FINDING_FIELDS]
+    instructions.append(json.dumps(output_schema, ensure_ascii=False))
     return [
         {"role": "system", "content": "\n".join(instructions)},
         {"role": "user", "content": request.model_dump_json(exclude_none=True)},
@@ -323,15 +341,11 @@ def check_review(request, output, visible):
         raise RoleRuleError("review must account for all previous issues")
     for index, finding in enumerate(output.findings):
         check_sources(finding.source_seqs, visible, f"findings/{index}/source_seqs")
-        if finding.target_item not in targets:
-            raise RoleRuleError("finding targets an unknown draft item")
-        prior = previous.get(finding.issue_id)
-        if prior and (prior.target_item != finding.target_item or prior.severity != finding.severity):
-            raise RoleRuleError("previous finding changed target or severity")
-        if prior and prior.closure_condition != finding.closure_condition:
-            raise RoleRuleError("previous finding changed its closure condition")
-        if not prior and finding.status == "closed":
-            raise RoleRuleError(f"findings/{index}/issue_id: closed findings must identify a previously tracked issue in issues")
+        if finding.issue_id not in previous:
+            if finding.target_item not in targets:
+                raise RoleRuleError(f"findings/{index}/target_item: finding targets an unknown draft item")
+            if finding.status == "closed":
+                raise RoleRuleError(f"findings/{index}/issue_id: closed findings must identify a previously tracked issue in issues")
     open_findings = [finding for finding in output.findings if finding.status == "open"]
     blocked = any(finding.severity == "blocking" for finding in open_findings)
     if output.verdict == "PASS" and blocked:
@@ -355,7 +369,10 @@ def _json_object(pairs):
 
 def validate_output(request: RoleRequest, raw: str) -> RoleOutput:
     """按固定角色解码，再核对可见消息、调度建议、草稿或冻结评审的引用。"""
-    output = OUTPUT_MODELS[request.role].model_validate(json.loads(raw, object_pairs_hook=_json_object))
+    context = None
+    if request.role == "reviewer":
+        context = {"prior_issues": {issue.issue_id: issue for issue in request.issues}}
+    output = OUTPUT_MODELS[request.role].model_validate(json.loads(raw, object_pairs_hook=_json_object), context=context)
     visible = {message.seq for message in request.messages}
     check_sources(output.source_seqs, visible)
     if isinstance(output, (HostOutput, CriticOutput)):

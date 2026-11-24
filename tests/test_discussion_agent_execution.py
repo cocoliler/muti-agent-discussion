@@ -242,6 +242,10 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 content = json.dumps(invalid)
             elif role_request.role == "reviewer" and calls.count("reviewer") == 2:
                 self.assertIn("review must identify the frozen draft", str(body["messages"]))
+            elif role_request.role == "reviewer" and role_request.issues:
+                revised = json.loads(content)
+                revised["findings"][0].update(target_item="unknown", severity="advisory", closure_condition="Rewritten by the model")
+                content = json.dumps(revised)
             return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": "stop"}],
                                             "usage": {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}})
 

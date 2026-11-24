@@ -107,15 +107,37 @@ class RoleContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RoleRuleError, "previously tracked issue"):
             self.check(task("reviewer", draft=frozen()), review(findings=[closed]))
         for output in (review(draft_id="d1"), review(), review(findings=[dict(closed, status="open")]),
-                       review(findings=[dict(closed, target_item="FR-01")]),
-                       review(findings=[dict(closed, severity="advisory")]),
-                       review(findings=[dict(closed, closure_condition="自行降低关闭标准")]),
-                       review(findings=[dict(closed, target_item="FR-99")]),
                        review(findings=[dict(closed, source_seqs=[])]),
                        review(verdict="REVISE", findings=[closed]),
                        review(verdict="NEEDS_INPUT", findings=[dict(closed, status="open")])):
             with self.subTest(output=output), self.assertRaises(ValueError):
                 self.check(req, output)
+
+    def test_review_uses_original_criteria_for_historical_findings(self):
+        original = issue()
+        req = task("reviewer", draft=frozen(), issues=[original])
+        original_fields = {key: original[key] for key in ("target_item", "severity", "closure_condition")}
+        assessment = dict(issue_id=original["issue_id"], owner_role="architect", description="复核结果及依据",
+                          status="closed", source_seqs=[7])
+        rewritten = dict(assessment, closure_condition="自行降低关闭标准", severity="advisory", target_item="FR-99")
+        for finding in (assessment, rewritten):
+            with self.subTest(finding=finding):
+                result = self.check(req, review(findings=[finding])).findings[0]
+                self.assertEqual(result.model_dump(include=set(original_fields)), original_fields)
+                self.assertEqual((result.status, result.description, result.source_seqs), ("closed", assessment["description"], [7]))
+        with self.assertRaisesRegex(RoleRuleError, "PASS cannot contain an open blocking finding"):
+            self.check(req, review(findings=[dict(rewritten, status="open")]))
+        new_finding = dict(assessment, issue_id="I-3", status="open")
+        with self.assertRaisesRegex(ValueError, "closure_condition"):
+            self.check(req, review(findings=[assessment, new_finding]))
+
+    def test_review_can_reassess_prior_target_removed_from_the_current_draft(self):
+        original = dict(issue(), target_item="FR-99")
+        req = task("reviewer", draft=frozen(), issues=[original])
+        finding = dict(original, description="已复核移除后的影响。", status="closed", source_seqs=[7])
+        self.assertEqual(self.check(req, review(findings=[finding])).findings[0].target_item, "FR-99")
+        with self.assertRaisesRegex(RoleRuleError, "unknown draft item"):
+            self.check(req, review(findings=[finding, dict(finding, issue_id="I-3", status="open")]))
 
     def test_new_user_input_can_update_old_parent_but_removed_ids_need_a_change_record(self):
         parent = dict(frozen(), input_version=1)
