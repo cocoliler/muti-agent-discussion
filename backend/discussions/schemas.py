@@ -1,6 +1,6 @@
 """HTTP 出入参模型（实施方案 §7）。
 
-**契约后定稿时只需改本文件**：路由层与存储层都不直接持有这些字段名。
+**字段定稿时只需改本文件**：路由层与存储层都不直接持有这些字段名。
 所有模型 ``extra="forbid"``，未知字段由 FastAPI 直接 422。
 """
 
@@ -170,7 +170,7 @@ class HandoffView(_Strict):
     #: spec_handoff 生成的规范化正文哈希，用于比对服务端实际保存的内容
     content_hash: str | None = None
     spec_revision_id: str | None = None
-    #: 导出路由未登记契约（默认关闭）时为 null
+    #: 导出未开启（默认）时为 null
     export_url: str | None = None
 
 

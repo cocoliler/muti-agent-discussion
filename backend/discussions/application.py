@@ -30,7 +30,7 @@ class DiscussionService:
     ) -> None:
         self.repo = repository
         self.agent_mode = "off"
-        #: 导出路由是否已登记契约（决定 confirm 是否返回 export_url）
+        #: 导出路由是否开启（决定 confirm 是否返回 export_url）
         self.export_enabled = export_enabled
         if engine is None or models is None:
             from discussion_orchestration import (  # 惰性导入：未装引擎时本模块仍可导入
@@ -107,7 +107,7 @@ class DiscussionService:
             "items": items,
             "has_more": has_more,
             "last_seq": meta["last_seq"],
-            # 不透明游标：契约列表统一用 next_cursor:null|string
+            # 不透明游标：列表统一返回 next_cursor:null|string
             "next_cursor": str(tail) if has_more else None,
         }
 
@@ -270,7 +270,7 @@ class DiscussionService:
                 "content_hash": content_hash,
                 "confirmed_at": handoff["confirmed_at"],
                 "spec_revision_id": None,
-                # 导出路由属第 7 个候选操作，未登记契约前默认不暴露，避免漂移检查拦截
+                # 导出不在 §6 的 6 个操作内，默认不暴露。
                 "export_url": (
                     f"/api/v1/discussions/{session_id}/export" if self.export_enabled else None
                 ),
@@ -529,7 +529,7 @@ class DiscussionService:
             "last_seq": session.last_seq,
             "state_version": meta["state_version"],
             "participants": self._participants(session),
-            "pending_tasks": [self._task_view(task) for task in session.tasks.values()],
+            "pending_tasks": [self._task_view(task) for task in getattr(session, "tasks", {}).values()],
             "agent_mode": self.agent_mode,
             "active_draft": (
                 {
@@ -571,7 +571,8 @@ class DiscussionService:
     def _participants(self, session: Any) -> list[dict[str, Any]]:
         """参与者状态：调用尝试 > 本轮已发言 > 已派发待执行。"""
         latest: dict[str, dict[str, Any]] = {}
-        current_ids = set(session.tasks) | {m.task_id for m in session.messages if m.round_no == session.round_no}
+        pending_tasks = getattr(session, "tasks", {})
+        current_ids = set(pending_tasks) | {m.task_id for m in session.messages if m.round_no == session.round_no}
         if session.current_draft:
             current_ids.add(f"{session.current_draft.draft_id}:agent:review")
         for attempt in self.repo.list_attempts(session.session_id):
@@ -581,7 +582,7 @@ class DiscussionService:
                 continue
             role = attempt["role"]
             previous = latest.get(role)
-            priority = (attempt["logical_task_id"] in session.tasks, attempt["started_at"], attempt["attempt_no"])
+            priority = (attempt["logical_task_id"] in pending_tasks, attempt["started_at"], attempt["attempt_no"])
             if previous is None or priority >= previous["priority"]:
                 latest[role] = {"priority": priority, "participant": {
                     "role": role, "status": str(attempt["status"]).lower(), "attempt_no": attempt["attempt_no"],
@@ -595,7 +596,7 @@ class DiscussionService:
         }
         queued = {
             getattr(task.role, "value", str(task.role))
-            for task in (getattr(session, "tasks", {}) or {}).values()
+            for task in pending_tasks.values()
         }
         roles = sorted(set(latest) | done | queued)
         return [

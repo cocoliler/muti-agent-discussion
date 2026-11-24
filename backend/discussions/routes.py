@@ -5,7 +5,7 @@
     from backend.discussions.routes import install
     install(app)          # 追加路由与异常处理器，仅此一行
 
-契约后定稿时，本文件与 ``schemas.py``/``errors.py`` 是唯一需要改动的三处。
+接口字段定稿时，本文件与 ``schemas.py``/``errors.py`` 是唯一需要改动的三处。
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from .schemas import (
     SessionView,
 )
 
-#: 契约：单个请求最大 1 MiB
+#: 约束：单个请求最大 1 MiB
 MAX_PAYLOAD_BYTES = 1 << 20
 
 DEFAULT_DB = Path(os.getenv("DISCUSSION_DB", str(Path(__file__).resolve().parent.parent / ".data" / "discussions.sqlite3")))
@@ -76,7 +76,7 @@ def _uuid(value: str, field: str) -> str:
 
 
 def _request_id(request: Request) -> str:
-    """契约要求信封里的 request_id 非空；缺省时生成一个，便于日志串联。"""
+    """接口约定要求信封里的 request_id 非空；缺省时生成一个，便于日志串联。"""
     supplied = (request.headers.get("X-Request-Id") or "").strip()
     if supplied:
         return supplied[:200]
@@ -256,8 +256,7 @@ def create_router(
         return JSONResponse(payload, status_code=status)
 
     if with_export:
-        # 第 7 个候选操作：§6 只列出 6 个讨论操作，导出未登记契约。
-        # 登记进 OPERATIONS 之前默认不暴露，避免漂移检查拒绝启动。
+        # 导出不在 §6 的 6 个讨论操作内，默认不注册。
         @router.get("/discussions/{session_id}/export", response_model=None)
         def export_discussion(session_id: str, service: DiscussionService = service_dep) -> Any:
             sid = _uuid(session_id, "session_id")
@@ -293,7 +292,7 @@ async def _storage_busy_handler(request: Request, exc: StorageBusy) -> JSONRespo
 
 
 class PayloadLimitMiddleware:
-    """ASGI 层请求体上限：契约规定单请求最大 1 MiB，超出返回 413。
+    """ASGI 层请求体上限：接口约束为单请求最大 1 MiB，超出返回 413。
 
     必须放在 ASGI 层而不是 FastAPI 依赖里：依赖执行时请求体已被读完，
     无法阻止大包进入内存，也拿不到稳定的 413 语义。
@@ -360,7 +359,7 @@ def install(
 ) -> None:
     """把讨论接口挂到既有 FastAPI 应用上（不改动 demo 路由）。
 
-    ``with_export`` 仅在导出操作登记进契约 ``OPERATIONS`` 后置 True。
+    ``with_export`` 默认关闭；需要 JSON 导出时显式置 True。
     """
     provider: Callable[[], DiscussionService] = (lambda: service) if service is not None else get_service
     if service is not None:
