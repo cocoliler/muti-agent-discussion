@@ -78,6 +78,8 @@ class TaskKind(str, Enum):
     RESPONSE = "response"
     INTEGRATION = "integration"
     DRAFT = "draft"
+    #: 权衡分歧的收敛打分，由主持人按维度给各方案打分。
+    SCORING = "scoring"
 
 
 class MessageKind(str, Enum):
@@ -102,6 +104,43 @@ class Severity(str, Enum):
     BLOCKING = "blocking"
     MAJOR = "major"
     MINOR = "minor"
+
+
+class DivergenceKind(str, Enum):
+    """分歧类型：决定用哪种方式收敛。"""
+
+    #: 事实分歧：缺证据，靠调研/引用补齐。
+    FACT = "fact"
+    #: 价值分歧：取舍标准不唯一，必须由用户裁决。
+    VALUE = "value"
+    #: 权衡分歧：各有取舍，按评分维度比较。
+    TRADEOFF = "tradeoff"
+
+
+class ScoreDimension(str, Enum):
+    """收敛打分的五个维度。每项 0-5 分，统一按「越高越好」记分。"""
+
+    USER_VALUE = "user_value"
+    FEASIBILITY = "feasibility"
+    COST = "cost"
+    DIFFERENTIATION = "differentiation"
+    RISK = "risk"
+
+
+#: 默认权重：用户价值优先，其次可行性。成本/风险按「可控程度」记分，因此正向加权。
+DEFAULT_SCORE_WEIGHTS: dict[ScoreDimension, float] = {
+    ScoreDimension.USER_VALUE: 0.30,
+    ScoreDimension.FEASIBILITY: 0.25,
+    ScoreDimension.COST: 0.15,
+    ScoreDimension.DIFFERENTIATION: 0.15,
+    ScoreDimension.RISK: 0.15,
+}
+
+
+#: 定向补充轮硬上限：超过后只能提交候选稿或请用户补充。
+MAX_DIRECTED_ROUNDS = 2
+#: 评审退回修订硬上限：超过后转人工裁决，避免无限循环。
+MAX_REVISION_ROUNDS = 2
 
 
 class IssueStatus(str, Enum):
@@ -175,6 +214,10 @@ class ReasonCode(str, Enum):
     DRAFT_NOT_READY = "draft_not_ready"
     DRAFT_CONTENT_MISSING = "draft_content_missing"
     PENDING_TASKS = "pending_tasks"
+    ROUND_LIMIT = "round_limit"
+    VALUE_DIVERGENCE_UNRESOLVED = "value_divergence_unresolved"
+    SCORING_REQUIRED = "scoring_required"
+    INVALID_SCORECARD = "invalid_scorecard"
     UNKNOWN_ISSUE = "unknown_issue"
     ISSUE_NEEDS_USER = "issue_needs_user"
     ISSUE_ALREADY_ASSIGNED = "issue_already_assigned"

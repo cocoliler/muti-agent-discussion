@@ -10,15 +10,27 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
 from discussion_orchestration.models import ClarificationAnswer
+from discussion_orchestration.scoring import rank_options
 
 from .codec import CodecError, decode, encode
 from .errors import ApiError, decision_error_code, decision_status
 from .repository import DiscussionRepository, NotFound, VersionConflict, utcnow
+
+
+def _configured_limit(name: str, default: int) -> int:
+    """轮次硬上限可由环境变量覆盖（默认 2），非法值回落到默认。"""
+
+    try:
+        value = int(os.getenv(name, ""))
+    except (TypeError, ValueError):
+        return default
+    return value if 1 <= value <= 50 else default
 
 
 class DiscussionService:
@@ -77,6 +89,12 @@ class DiscussionService:
             project_id=project_id,
             idea=idea,
         )
+        session.max_directed_rounds = _configured_limit(
+            "DISCUSSION_MAX_DIRECTED_ROUNDS", getattr(session, "max_directed_rounds", 2)
+        )
+        session.max_revision_rounds = _configured_limit(
+            "DISCUSSION_MAX_REVISION_ROUNDS", getattr(session, "max_revision_rounds", 2)
+        )
         body = self._render(session, {"state_version": 1})
         self.repo.create_session(
             session,
@@ -108,7 +126,9 @@ class DiscussionService:
         self._meta(session_id)
         return self.repo.history(session_id)
 
-    def export_content(self, session_id: str) -> dict[str, Any]:
+    def export_content(self, session_id: str, draft_id: str | None = None) -> dict[str, Any]:
+        if draft_id is not None:
+            return self._export_draft(session_id, draft_id)
         handoff = self.repo.get_handoff(session_id)
         if not handoff:
             raise ApiError("VALIDATION_FAILED", "尚未签收，无法导出", status=409)
@@ -124,6 +144,31 @@ class DiscussionService:
             "draft_id": handoff.get("draft_id"),
             "content_hash": handoff.get("content_hash"),
             "handoff": handoff,
+        }
+
+    def _export_draft(self, session_id: str, draft_id: str) -> dict[str, Any]:
+        """把任意草稿版本转成 FlowStudio 正文，供前端未签收时先导出排查。
+
+        草稿里的 `source_seqs`、`covers`、`pain_points`、`risks`、
+        `removed_requirement_ids` 只用于追溯，`DraftSpec.to_content()` 会把它们剔除，
+        得到与 FlowStudio 导入契约同形的正文；结构不合格由导出层返回 409。
+        """
+
+        from spec_handoff import DraftSpec
+
+        session, _ = self._load(session_id)
+        draft = next(
+            (item for item in getattr(session, "drafts", ()) if item.draft_id == draft_id),
+            None,
+        )
+        if draft is None:
+            raise ApiError("NOT_FOUND", f"找不到草稿版本 {draft_id}", status=404)
+        return {
+            "content": DraftSpec.parse(draft.content).to_content(),
+            "draft_id": draft.draft_id,
+            "draft_version": draft.version,
+            "content_hash": None,
+            "handoff": None,
         }
 
     # ------------------------------------------------------------------ 写
@@ -560,10 +605,16 @@ class DiscussionService:
                     "open_issue_ids": list(draft.open_issue_ids),
                     "review_verdict": review_verdict,
                     "content": dict(draft.content),
+                    "agreements": list(getattr(draft, "agreements", ()) or ()),
+                    "alternatives": list(getattr(draft, "alternatives", ()) or ()),
+                    "disagreements": list(getattr(draft, "disagreements", ()) or ()),
+                    "scorecard_id": getattr(draft, "scorecard_id", None),
+                    "chosen_option_id": getattr(draft, "chosen_option_id", None),
                 }
                 if draft is not None
                 else None
             ),
+            "scorecard": self._scorecard_view(session),
             # §6 要求返回"草稿、评审"：历史以版本摘要呈现，正文在 active_draft
             "drafts": [
                 {
@@ -586,6 +637,37 @@ class DiscussionService:
                 for item in getattr(session, "reviews", ()) or ()
             ],
             "open_issues": [encode(issue) for issue in session.open_issues()],
+        }
+
+    def _scorecard_view(self, session: Any) -> dict[str, Any] | None:
+        """最新一份当前输入版本的评分卡，附带确定性排名。"""
+
+        cards = [
+            card
+            for card in getattr(session, "scorecards", ()) or ()
+            if card.input_version == session.input_version
+        ]
+        if not cards:
+            return None
+        card = cards[-1]
+        ranked = rank_options(card.options, card.weights)
+        return {
+            "scorecard_id": card.scorecard_id,
+            "topic_id": card.topic_id,
+            "input_version": card.input_version,
+            "chosen_option_id": card.chosen_option_id,
+            "rationale": card.rationale,
+            "weights": {dimension.value: weight for dimension, weight in card.weights.items()},
+            "options": [
+                {
+                    "option_id": option.option_id,
+                    "title": option.title,
+                    "scores": {dimension.value: value for dimension, value in option.scores.items()},
+                    "total": option.total,
+                    "rank": option.rank,
+                }
+                for option in ranked
+            ],
         }
 
     def _participants(self, session: Any) -> list[dict[str, Any]]:

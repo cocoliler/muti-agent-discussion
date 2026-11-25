@@ -31,6 +31,29 @@ export type DraftVersion = {
 export type Draft = DraftVersion & {
   review_verdict: string | null;
   content: { product_name?: string; requirements?: Requirement[]; [key: string]: unknown };
+  agreements?: string[];
+  alternatives?: string[];
+  disagreements?: string[];
+  scorecard_id?: string | null;
+  chosen_option_id?: string | null;
+};
+
+export type ScoredOption = {
+  option_id: string;
+  title: string;
+  scores: Record<string, number>;
+  total: number;
+  rank: number;
+};
+
+export type Scorecard = {
+  scorecard_id: string;
+  topic_id: string;
+  input_version: number;
+  chosen_option_id: string;
+  rationale: string;
+  weights: Record<string, number>;
+  options: ScoredOption[];
 };
 
 export type Finding = { code?: string; path?: string; message?: string; finding_id?: string;
@@ -56,9 +79,10 @@ export type Session = {
   pending_tasks?: Task[];
   agent_mode?: 'simulation' | 'real' | 'off';
   active_draft: Draft | null;
+  scorecard?: Scorecard | null;
   drafts: (DraftVersion & { current: boolean })[];
   reviews: { review_id: string; draft_id: string; verdict: string; findings: Finding[] }[];
-  open_issues: { issue_id: string; summary: string; severity: string; status: string; source_seqs: number[] }[];
+  open_issues: { issue_id: string; summary: string; severity: string; kind?: string; status: string; source_seqs: number[] }[];
 };
 
 export type Task = {

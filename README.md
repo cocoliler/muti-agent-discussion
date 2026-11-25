@@ -32,7 +32,11 @@ npm.cmd --prefix frontend run build
 
 正式讨论默认使用模拟 Agent。主持人自动开题，专业角色发言和回应，质疑者提出问题，记录员整理和起草规格，独立评审检查草稿并按需启动修订轮。需要补充或签收时，由用户决定。`DISCUSSION_AGENT_MODE=off` 可切换为手动联调。工作台可比较本次打开期间加载过的草稿版本。
 
-签收后，在「共识规格」选择已签收的当前版本，点击「下载签收规格 JSON」。在 FlowStudio 点击「导入规格 JSON」，直接选择下载的 `design-spec.json`。重新打开已签收的讨论也可以再次下载同一份正文。[讨论 API](backend/discussions/README.md)
+签收后，在「共识规格」选择已签收的当前版本，点击「下载签收规格 JSON」。在 FlowStudio 点击「导入规格 JSON」，直接选择下载的 `design-spec.json`。重新打开已签收的讨论也可以再次下载同一份正文。
+
+共识规格侧栏里每个已加载的草稿版本都有「导出 JSON」按钮，未签收时也能先导出当前草稿。草稿中的 `source_seqs`、`covers`、`pain_points`、`risks` 等追溯字段会在导出时剔除，得到的就是可导入正文。
+
+下载文件由 `spec_handoff.export` 生成：根节点就是 `DesignSpecContent` v1.0（无外层包装），UTF-8 无 BOM、2 空格缩进、LF 行尾、字段按契约顺序，写出前重跑结构校验与 1 MiB 上限。响应头 `X-Content-Hash` 与 FlowStudio `content_hash()` 同算法，可直接比对版本哈希。[讨论 API](backend/discussions/README.md)
 
 ### 使用真实模型
 

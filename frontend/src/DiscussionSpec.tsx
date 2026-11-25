@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { discussionPath } from './discussions';
 import type { Draft, Handoff, Requirement, Session } from './discussions';
 
 const verdictLabels: Record<string, string> = { pass: '通过', revise: '退回修订', needs_input: '需要补充' };
@@ -23,6 +24,8 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
   const [view, setView] = useState<'draft' | 'reviews'>('draft');
   const [editingReason, setEditingReason] = useState(false);
   const [reason, setReason] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
   const drafts = session?.drafts ?? [];
   const active = session?.active_draft;
   const selected = drafts.find((draft) => draft.draft_id === selection) ?? active ?? drafts.at(-1);
@@ -36,8 +39,13 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
   const exportUrl = current && session?.status === 'completed' ? session.export_url ?? receipt?.export_url : null;
   const verdict = reviews.at(-1)?.verdict ?? draft?.review_verdict;
   const comparing = comparison && !!prior && !!draft;
+  const scorecard = session?.scorecard ?? null;
 
-  useEffect(() => { setEditingReason(false); setReason(''); }, [selected?.draft_id, requestChanges !== undefined]);
+  useEffect(() => {
+    setEditingReason(false);
+    setReason('');
+    setExportError('');
+  }, [selected?.draft_id, requestChanges !== undefined]);
 
   useEffect(() => {
     if (!highlighted || view !== 'draft') return;
@@ -64,6 +72,33 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
   // A new reference requests navigation. Polls should not return focus to an old target.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemRef]);
+
+  async function exportDraft() {
+    if (!session || !selected) return;
+    setExporting(true);
+    setExportError('');
+    try {
+      const url = `/api/v1${discussionPath(session.id)}/export?draft_id=${encodeURIComponent(selected.draft_id)}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        const detail = await response.json().catch(() => null);
+        const issue = detail?.error?.issues?.[0];
+        throw new Error([detail?.error?.message ?? `导出失败（HTTP ${response.status}）`,
+          issue && `${issue.path} ${issue.message}`].filter(Boolean).join('。'));
+      }
+      const blob = await response.blob();
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = href;
+      link.download = 'design-spec.json';
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(href), 1000);
+    } catch (cause) {
+      setExportError(cause instanceof Error ? cause.message : '导出失败。');
+    } finally {
+      setExporting(false);
+    }
+  }
 
   return <aside className="spec" aria-label="共识规格">
     <header className="pane-title"><div><h2 id="live-spec-title" tabIndex={-1}>共识规格</h2><p>需求、评审与签收</p></div>
@@ -114,6 +149,33 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
       })}
       {comparing && oldItems.filter((item) => !items.some((current) => current.id === item.id)).map((item) =>
         <section className="requirement" key={item.id}><header><strong>{item.id}</strong><span>已移除</span></header><p className="removed"><s>{item.text}</s></p></section>)}
+      {scorecard && <section className="scorecard">
+        <p className="section-label">方案评分（加权）</p>
+        <ol>{scorecard.options.map((option) => <li key={option.option_id}
+          className={option.option_id === scorecard.chosen_option_id ? 'chosen' : ''}>
+          <strong>{option.option_id}</strong> {option.title} · {option.total.toFixed(2)} 分
+          {option.option_id === scorecard.chosen_option_id && <span className="tag">已采纳</span>}
+        </li>)}</ol>
+        {scorecard.rationale && <p className="scorecard-note">{scorecard.rationale}</p>}
+      </section>}
+      {draft && ((draft.disagreements?.length ?? 0) > 0 || (draft.alternatives?.length ?? 0) > 0) &&
+        <section className="divergence">
+          {(draft.disagreements?.length ?? 0) > 0 && <>
+            <p className="section-label">保留的分歧</p>
+            <ul>{draft.disagreements!.map((item, index) => <li key={index}>{item}</li>)}</ul>
+          </>}
+          {(draft.alternatives?.length ?? 0) > 0 && <>
+            <p className="section-label">备选方案</p>
+            <ul>{draft.alternatives!.map((item, index) => <li key={index}>{item}</li>)}</ul>
+          </>}
+        </section>}
+      {draft && <div className="spec-export">
+        <button type="button" onClick={() => void exportDraft()} disabled={exporting || busy}>
+          {exporting ? '正在导出…' : '导出 JSON'}
+        </button>
+        <span>可直接导入 FlowStudio</span>
+        {exportError && <p role="alert">{exportError}</p>}
+      </div>}
       {draft && <details className="draft-context"><summary>草稿正文 JSON</summary><pre>{JSON.stringify(draft.content, null, 2)}</pre></details>}
       </>}
       {view === 'reviews' && (reviews.length === 0 ? <p className="draft-context">此版本还没有评审记录。</p> : reviews.map((review) => <section key={review.review_id} className="requirement">

@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .enums import (
+    MAX_DIRECTED_ROUNDS,
+    MAX_REVISION_ROUNDS,
     PROFESSIONAL_ROLES,
+    DivergenceKind,
+    ScoreDimension,
     HostAction,
     IssueStatus,
     MessageKind,
@@ -102,6 +106,8 @@ class Issue:
     raised_by: Role
     summary: str
     severity: Severity
+    #: 分歧类型：价值分歧不能由角色互相说服，必须交用户裁决。
+    kind: DivergenceKind = DivergenceKind.FACT
     source_seqs: tuple[int, ...] = ()
     assignee: Role | None = None
     needs_user: bool = False
@@ -109,6 +115,29 @@ class Issue:
     closed_by_seq: int | None = None
     #: 问题所属的输入版本。输入版本升级后旧问题保留历史，但不再计入当前成稿门禁。
     input_version: int = 1
+
+
+@dataclass(frozen=True)
+class OptionScore:
+    """一个备选方案在五个维度上的得分（0-5，越高越好）。"""
+
+    option_id: str
+    title: str
+    scores: Mapping[ScoreDimension, int]
+
+
+@dataclass(frozen=True)
+class Scorecard:
+    """收敛评分卡。权重与排名由编排层计算，模型只提供各维度原始分。"""
+
+    options: tuple[OptionScore, ...]
+    scorecard_id: str = ""
+    session_id: str = ""
+    topic_id: str = ""
+    input_version: int = 1
+    weights: Mapping[ScoreDimension, float] = field(default_factory=dict)
+    rationale: str = ""
+    chosen_option_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -150,6 +179,12 @@ class SpeakerOutput:
     not_applicable: str | None = None
     draft_content: Mapping[str, Any] | None = None
     item_refs: tuple[str, ...] = ()
+    #: 记录员在成稿时保留的分歧记录，随草稿版本落库、供前端与签收展示。
+    agreements: tuple[str, ...] = ()
+    alternatives: tuple[str, ...] = ()
+    disagreements: tuple[str, ...] = ()
+    #: 评分任务的结果；其他任务为空。
+    scorecard: Scorecard | None = None
 
 
 @dataclass(frozen=True)
@@ -193,6 +228,13 @@ class DraftRevision:
     current: bool = True
     review_id: str | None = None
     open_issue_ids: tuple[str, ...] = ()
+    #: 成稿时记录员保留的共识、备选项与未收敛分歧。导出时不含这些字段。
+    agreements: tuple[str, ...] = ()
+    alternatives: tuple[str, ...] = ()
+    disagreements: tuple[str, ...] = ()
+    #: 本版本依据的评分卡与被采纳的方案，用于追溯「为什么这么定」。
+    scorecard_id: str | None = None
+    chosen_option_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -258,10 +300,16 @@ class DiscussionSession:
     closed_topics: set[str] = field(default_factory=set)
     drafts: list[DraftRevision] = field(default_factory=list)
     reviews: list[ReviewResult] = field(default_factory=list)
+    #: 每个议题的收敛评分卡（按输入版本），以及最终采纳的方案。
+    scorecards: list[Scorecard] = field(default_factory=list)
+    chosen_option_id: str | None = None
     rejections: list[Rejection] = field(default_factory=list)
     failures: dict[str, list[str]] = field(default_factory=dict)
     directed_rounds: int = 0
     revision_rounds: int = 0
+    #: 硬性轮次上限：防止「评审不断换措辞提新问题」导致无限循环。
+    max_directed_rounds: int = MAX_DIRECTED_ROUNDS
+    max_revision_rounds: int = MAX_REVISION_ROUNDS
     dispatch_units: int = 0
     round_challenged: bool = False
     paused_from: SessionStatus | None = None

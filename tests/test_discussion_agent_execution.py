@@ -225,6 +225,76 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                                       ["product", "research", "architect", "designer", "business"])
                 self.assertEqual(client.get(path).json()["waiting_for"], "user_input")
 
+    def test_value_divergence_goes_to_user_instead_of_peer_debate(self):
+        complete = SimulationProvider.complete
+
+        async def value_critic(provider, request, messages):
+            response = await complete(provider, request, messages)
+            if request.role == "critic":
+                output = json.loads(response.content)
+                output["divergence"] = "value"
+                return Completion(json.dumps(output), response.usage)
+            return response
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(SimulationProvider, "complete", value_critic):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                self.assertEqual(created.status_code, 201, created.text)
+                state = client.get(f"/api/v1/discussions/{created.json()['id']}").json()
+
+                self.assertEqual(state["status"], "clarifying", state)
+                self.assertEqual(state["waiting_for"], "user_input")
+                self.assertTrue(state["clarification"]["questions"])
+                self.assertTrue(any(issue.get("kind") == "value" for issue in state["open_issues"]))
+                # 价值分歧不派发点名回应：没有 response 消息，也不进入定向补充轮。
+                messages = client.get(f"/api/v1/discussions/{created.json()['id']}/messages").json()["items"]
+                self.assertFalse([m for m in messages if m["kind"] == "response"])
+
+    def test_tradeoff_divergence_triggers_scoring_before_draft(self):
+        complete = SimulationProvider.complete
+
+        async def tradeoff_critic(provider, request, messages):
+            response = await complete(provider, request, messages)
+            if request.role == "critic":
+                output = json.loads(response.content)
+                output["divergence"] = "tradeoff"
+                return Completion(json.dumps(output), response.usage)
+            return response
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(SimulationProvider, "complete", tradeoff_critic):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                self.assertEqual(created.status_code, 201, created.text)
+                session_id = created.json()["id"]
+                state = client.get(f"/api/v1/discussions/{session_id}").json()
+
+                self.assertEqual(state["status"], "awaiting_confirmation", state)
+                self.assertIsNotNone(state["scorecard"], state)
+                self.assertEqual(state["scorecard"]["chosen_option_id"], "A")
+                self.assertEqual([option["option_id"] for option in state["scorecard"]["options"]], ["A", "B"])
+                self.assertEqual(state["active_draft"]["chosen_option_id"], "A")
+                self.assertEqual(state["active_draft"]["scorecard_id"], state["scorecard"]["scorecard_id"])
+
+                confirmed = client.post(f"/api/v1/discussions/{session_id}/confirm", json={
+                    "draft_id": state["active_draft"]["draft_id"],
+                    "input_version": state["input_version"],
+                    "expected_state_version": state["state_version"],
+                }, headers={"Idempotency-Key": str(uuid4())})
+                self.assertTrue(confirmed.json()["decision"]["ok"], confirmed.text)
+                # 评分卡只用于决策与展示，不进入 FlowStudio 导入正文。
+                exported = json.loads(client.get(
+                    f"/api/v1/discussions/{session_id}/export").content.decode("utf-8"))
+                self.assertNotIn("scorecard_id", exported)
+                self.assertNotIn("chosen_option_id", exported)
+
     def test_revisions_switch_bounded_execution_batches_automatically(self):
         complete = SimulationProvider.complete
         runners = []
@@ -245,8 +315,10 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                     finding["status"] = "open"
             return Completion(json.dumps(output), response.usage)
 
-        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
-                patch.object(SimulationProvider, "complete", extended_revision), \
+        # 本用例验证「调用预算用尽后自动换批」，需要 18 个版本，故放宽修订硬上限。
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {
+            "DISCUSSION_AGENT_MODE": "simulation", "DISCUSSION_MAX_REVISION_ROUNDS": "30",
+        }), patch.object(SimulationProvider, "complete", extended_revision), \
                 patch("backend.discussions.agent_execution.RoleRunner", side_effect=track_runner):
             service = build_service(Path(directory) / "discussion.sqlite3")
             with TestClient(create_app(service, with_agents=True)) as client:

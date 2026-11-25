@@ -1,6 +1,7 @@
 """Deterministic discussion roles for offline development and integration tests."""
 
 import json
+import os
 import re
 from copy import deepcopy
 
@@ -25,7 +26,25 @@ def _sources(message):
     return [message.seq] if message else []
 
 
+def _scoring(req):
+    """权衡分歧的模拟评分：固定两个方案，让流程可以离线跑通。"""
+    message = _latest(req, {"critic", "scribe", "product"}) or _latest(req, {"user"})
+    topic = (req.topic or "").strip() or _goal(req)
+    options = [
+        {"option_id": "A", "title": f"方案 A：{topic[:60]}",
+         "scores": {"user_value": 5, "feasibility": 4, "cost": 3, "differentiation": 3, "risk": 3}},
+        {"option_id": "B", "title": "方案 B：延后到下一版本，先交付最小可用范围",
+         "scores": {"user_value": 3, "feasibility": 5, "cost": 5, "differentiation": 2, "risk": 4}},
+    ]
+    return dict(text="权衡分歧按五个维度打分，采纳综合得分更高的方案。", action="SCORE",
+                topic_id=req.topic_id, target_roles=[], issue_ids=[], questions=[],
+                source_seqs=_sources(message),
+                scorecard={"options": options, "rationale": "优先保证用户价值，同时控制成本与风险。"})
+
+
 def _host(req):
+    if req.kind == "scoring":
+        return _scoring(req)
     goal = _goal(req)
     blocking = [i for i in req.issues if i.severity == "blocking" and not i.treatment]
     owners = [r for r in req.allowed_roles if any(i.owner_role == r for i in blocking)]
@@ -87,8 +106,10 @@ def _critic(req):
     if not message or not req.allowed_roles:
         raise ProviderError("insufficient_context")
     target = message.role if message.role in req.allowed_roles else req.allowed_roles[0]
+    divergence = os.environ.get("DISCUSSION_SIMULATE_DIVERGENCE", "").strip().lower()
     return dict(text=f"针对消息 {message.seq} 的「{message.text[:160]}」，输入不完整时用户会看到什么结果？",
                 source_seqs=[message.seq], target_roles=[target],
+                divergence=divergence if divergence in ("fact", "value", "tradeoff") else "fact",
                 verification=f"针对「{_goal(req)}」分别提交有效输入和缺少必填项的输入，记录两次输出及保存状态。")
 
 

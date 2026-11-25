@@ -8,12 +8,11 @@ import sqlite3
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .discussions.routes import install
+from .discussions.routes import install, spec_download
 from .scenario import APPROVED_STAGE, BACKEND, scenario_draft, scenario_events
 
 DB = Path(os.getenv("DISCUSSION_DB", str(BACKEND / ".data/discussions.sqlite3")))
@@ -117,9 +116,7 @@ def export(session_id: UUID):
         state = load(connection, str(session_id))
         if state["stage"] != APPROVED_STAGE:
             raise HTTPException(409, "请先签收当前规格")
-        return JSONResponse(state["drafts"][-1]["content"], headers={
-            "Content-Disposition": 'attachment; filename="meeting-room.design-spec.json"'
-        })
+        return spec_download(state["drafts"][-1]["content"])
 
 
 install(app, with_agents=True, with_export=True)

@@ -17,9 +17,11 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from spec_handoff import check_export, content_hash, dump_text
 
 from .application import DiscussionService
 from .agent_execution import AgentExecution
@@ -102,6 +104,33 @@ def _require_key(key: str | None) -> str:
             issues=[{"path": "/Idempotency-Key", "message": "格式非法"}],
         ) from exc
     return key
+
+
+def spec_download(content: Any, *, filename: str = "design-spec.json") -> Response:
+    """把签收正文写成 FlowStudio「导入规格 JSON」可直接读取的文件。
+
+    导出统一走 `spec_handoff.export`：契约字段顺序、2 空格缩进、UTF-8 无 BOM、LF 行尾，
+    并在写出前重跑一次结构 + 1 MiB 校验，避免导出 FlowStudio 会拒绝的正文。
+    响应头 `X-Content-Hash` 与 FlowStudio `content_hash()` 同一算法，可直接比对。
+    """
+
+    findings = check_export(content)
+    if findings:
+        raise ApiError(
+            "VALIDATION_FAILED",
+            "签收正文未通过交付校验，无法导出",
+            status=409,
+            issues=[item.as_dict() for item in findings],
+        )
+    body = dump_text(content)
+    return Response(
+        content=body.encode("utf-8"),
+        media_type="application/json; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Hash": content_hash(content),
+        },
+    )
 
 
 def create_router(
@@ -271,13 +300,18 @@ def create_router(
     if with_export:
         # 导出不在 §6 的 6 个讨论操作内，默认不注册。
         @router.get("/discussions/{session_id}/export", response_model=None)
-        def export_discussion(session_id: str, service: DiscussionService = service_dep) -> Any:
+        def export_discussion(
+            session_id: str,
+            draft_id: str | None = Query(default=None, max_length=200),
+            service: DiscussionService = service_dep,
+        ) -> Any:
             sid = _uuid(session_id, "session_id")
-            payload = service.export_content(sid)
-            return JSONResponse(
-                payload["content"],
-                headers={"Content-Disposition": 'attachment; filename="design-spec.json"'},
+            payload = (
+                service.export_content(sid)
+                if draft_id is None
+                else service.export_content(sid, draft_id=draft_id)
             )
+            return spec_download(payload["content"])
 
     return router
 

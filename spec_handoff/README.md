@@ -123,7 +123,10 @@ input_version, content, content_hash, confirmed_at`），对应设计文档第 5
 - 文件上限 1 MiB（`EXPORT_TOO_LARGE`），与前端导入、后端请求体上限一致；
 - `content_hash` 与 FlowStudio `content_hash` 同一规范化算法（键排序、紧凑分隔符、
   `ensure_ascii=False`），可直接比对 `SpecRevision.hash`；
-- 需要归档评审与草稿关联时用 `export_handoff_bundle`，该包**不可**用于导入。
+- 需要归档评审与草稿关联时用 `export_handoff_bundle`，该包**不可**用于导入；
+- 讨论工作台的 `GET /api/v1/discussions/{id}/export`（可带 `?draft_id=` 导出任意草稿版本）与
+  `/api/demo/{id}/export` 直接复用 `dump_text` + `check_export`，下载到的文件就是本节的正文，
+  可直接导入 FlowStudio。
 
 ## 7. 规格版本 API 交接
 

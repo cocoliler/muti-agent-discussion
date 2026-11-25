@@ -10,6 +10,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstr
 
 Specialist = Literal["product", "research", "architect", "designer", "market"]
 Role = Specialist | Literal["host", "critic", "scribe", "reviewer"]
+ScoreDimension = Literal["user_value", "feasibility", "cost", "differentiation", "risk"]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Positive = Annotated[int, Field(gt=0)]
 Seqs = list[Positive]
@@ -87,6 +88,8 @@ class Issue(Contract):
     description: Text
     owner_role: Specialist | Literal["scribe"]
     closure_condition: Text
+    #: fact 靠证据收敛；value 必须由用户裁决；tradeoff 按评分维度权衡。
+    kind: Literal["fact", "value", "tradeoff"] = "fact"
 
 
 class PriorIssue(Issue):
@@ -108,6 +111,8 @@ class RoleRequest(Contract):
     """由调度端构造；messages 仅接收本逻辑任务明确选中的原始消息。"""
 
     role: Role
+    #: 任务类型（statement/challenge/response/integration/draft/scoring）。
+    kind: str = ""
     logical_task_id: Text
     session_id: Text
     input_version: Positive
@@ -164,13 +169,27 @@ def clean_question_options(value):
 QuestionOptions = Annotated[dict[Text, list[Text]], BeforeValidator(clean_question_options)]
 
 
+class OptionScoreInput(Contract):
+    option_id: Text
+    title: Text
+    #: 五个维度各 0-5 分，统一按「越高越好」记分（成本/风险记可控程度）。
+    scores: dict[ScoreDimension, Annotated[int, Field(ge=0, le=5)]]
+
+
+class ScorecardInput(Contract):
+    options: Annotated[list[OptionScoreInput], Field(min_length=2, max_length=8)]
+    rationale: str = ""
+
+
 class HostOutput(RoleOutput):
-    action: Literal["DISCUSS", "ASK_USER", "SUBMIT_REVIEW"]
+    action: Literal["DISCUSS", "ASK_USER", "SUBMIT_REVIEW", "SCORE"]
     topic_id: Text
     target_roles: list[Specialist]
     issue_ids: list[Text]
     questions: list[Text]
     question_options: QuestionOptions = Field(default_factory=dict)
+    #: action=SCORE 时给出权衡分歧的收敛评分卡。
+    scorecard: ScorecardInput | None = None
 
 
 class OpinionOutput(RoleOutput):
@@ -181,6 +200,8 @@ class OpinionOutput(RoleOutput):
 class CriticOutput(RoleOutput):
     target_roles: Annotated[list[Specialist], Field(min_length=1)]
     verification: Text
+    #: 本轮质疑的分歧类型，服务端据此决定交角色回应还是交用户裁决。
+    divergence: Literal["fact", "value", "tradeoff"] = "fact"
 
 
 class RequirementChange(Contract):
@@ -235,14 +256,14 @@ OUTPUT_MODELS: dict[str, type[RoleOutput]] = {
 }
 
 ROLE_INSTRUCTIONS = {
-    "host": "你是主持人。说明本轮议题与动作理由，限议题相关角色点名。DISCUSS 需点名专业角色；ASK_USER 列出澄清问题；仅在具备当前候选稿且无阻断时建议 SUBMIT_REVIEW。后两种动作的 target_roles 留空，仅 ASK_USER 填写 questions。issue_ids 只引用已提供的问题。",
+    "host": "你是主持人。说明本轮议题与动作理由，限议题相关角色点名。DISCUSS 需点名专业角色；ASK_USER 列出澄清问题；仅在具备当前候选稿且无阻断时建议 SUBMIT_REVIEW。后两种动作的 target_roles 留空，仅 ASK_USER 填写 questions。issue_ids 只引用已提供的问题。kind=value 的价值分歧只能 ASK_USER 交用户裁决，不能点名回应；定向补充轮与修订轮有硬上限，超限时请提交候选稿或请用户补充。任务 kind=scoring 时输出 action=\"SCORE\" 并给出 scorecard：2-8 个备选方案，每个方案对 user_value、feasibility、cost、differentiation、risk 各打 0-5 整数分（成本与风险按「可控程度」打分，越高越好），rationale 写一句采纳理由；此时 target_roles、questions、issue_ids 均留空。",
     "product": "你是群聊产品经理。围绕用户价值、优先级、首版范围与范围外事项发言；收到点名时回应相应问题。",
     "research": "你是用户研究员。围绕用户、真实场景、痛点及依据发言，标明待验证假设、影响和验证方法。",
     "architect": "你是技术架构师。说明依赖、成本假设、技术约束、故障场景与可行取舍，并给出可检验的处理方式。",
     "designer": "你是设计师。说明用户旅程、关键交互、失败或空状态及用户可观察结果，回应被指出的遗漏。",
     "market": "你是商业与市场分析师。涉及竞品、定价、需求规模时注明依据。缺少来源的判断标为 assumption。内部项目可用 not_applicable 并在 text 解释理由。",
-    "critic": "你是质疑者。引用至少一条提供的用户输入消息或具体发言，指出反例、遗漏或潜在故障，点名可回应的专业角色并给出验证方法。",
-    "scribe": "你是记录员。整理共识、备选项、分歧、假设及风险；逐条列明需求的消息依据。已确认的假设才写入正式正文。普通改写沿用需求 ID，删除、合并、拆分在 requirement_changes 给出原 ID、去向和理由；整改项应落实到可观察验收条件。",
+    "critic": "你是质疑者。引用至少一条提供的用户输入消息或具体发言，指出反例、遗漏或潜在故障，点名可回应的专业角色并给出验证方法。用 divergence 标注分歧类型：缺证据的事实分歧填 fact，取舍标准不唯一的价值分歧填 value（服务端会直接请用户裁决），各有得失的权衡分歧填 tradeoff。",
+    "scribe": "你是记录员。整理共识、备选项、分歧、假设及风险；逐条列明需求的消息依据。若已有收敛评分结论，正文按被采纳的方案写，并把未采纳的备选写进 alternatives。已确认的假设才写入正式正文。普通改写沿用需求 ID，删除、合并、拆分在 requirement_changes 给出原 ID、去向和理由；整改项应落实到可观察验收条件。",
     "reviewer": "你是独立评审。仅评审所给冻结稿，逐项检查范围、证据、体验、技术约束、风险与可观察验收。目标使用现有需求 ID 或顶层正文字段。新发现给出稳定 ID、严重度、依据、负责角色和关闭条件。逐项复核上轮问题，关闭时在 description 说明整改及复核结果并引用证据。PASS 不得留有阻断；REVISE 指出待修项；NEEDS_INPUT 指明阻断项并提出用户可回答的问题。",
 }
 
@@ -311,6 +332,17 @@ def check_host(request, output):
         request.draft is None or any(issue.severity == "blocking" and not issue.treatment for issue in request.issues)
     ):
         raise RoleRuleError("review requires a current draft and treatment for blocking issues")
+    if output.action == "SCORE":
+        if output.scorecard is None:
+            raise RoleRuleError("SCORE requires a scorecard")
+        if output.target_roles or output.questions or output.issue_ids:
+            raise RoleRuleError("SCORE only submits a scorecard")
+        if request.kind != "scoring":
+            raise RoleRuleError("SCORE is only allowed for a scoring task")
+    elif output.scorecard is not None:
+        raise RoleRuleError("scorecard is only valid with action=SCORE")
+    if request.kind == "scoring" and output.action != "SCORE":
+        raise RoleRuleError("a scoring task must answer with action=SCORE")
 
 
 def check_draft_changes(request, output):

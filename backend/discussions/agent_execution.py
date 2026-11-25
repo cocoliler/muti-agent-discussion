@@ -6,7 +6,14 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from discussion_orchestration import MessageKind, Role, SessionStatus, TaskKind, WaitingFor
+from discussion_orchestration import (
+    DivergenceKind,
+    MessageKind,
+    Role,
+    SessionStatus,
+    TaskKind,
+    WaitingFor,
+)
 from spec_handoff.draft import DraftSpec
 
 from backend.roles.contracts import DraftSnapshot, PriorIssue, RoleRequest, SourceMessage
@@ -128,13 +135,19 @@ class AgentExecution:
                 proposal = {"action": "ask_user", "questions": [issue.summary for issue in issues],
                             "issue_ids": [issue.issue_id for issue in issues]}
             elif issues:
-                assignments = {}
-                sources = {message.seq: message.role for message in session.messages}
-                for issue in issues:
-                    role = issue.assignee or next((sources.get(seq) for seq in reversed(issue.source_seqs)
-                                                   if sources.get(seq) in item.role_scope), item.role_scope[0])
-                    assignments.setdefault(role.value, []).append(issue.issue_id)
-                proposal = {"action": "name_responses", "assignments": assignments}
+                # 权衡分歧不能点名争论，交给引擎的收敛打分；只有事实分歧才点名回应。
+                assignable = [issue for issue in issues if issue.kind != DivergenceKind.TRADEOFF]
+                if not assignable:
+                    items = session.agenda.items
+                    proposal = {"action": "submit_draft" if item == items[-1] else "next_topic"}
+                else:
+                    assignments = {}
+                    sources = {message.seq: message.role for message in session.messages}
+                    for issue in assignable:
+                        role = issue.assignee or next((sources.get(seq) for seq in reversed(issue.source_seqs)
+                                                       if sources.get(seq) in item.role_scope), item.role_scope[0])
+                        assignments.setdefault(role.value, []).append(issue.issue_id)
+                    proposal = {"action": "name_responses", "assignments": assignments}
             else:
                 items = session.agenda.items
                 proposal = {"action": "submit_draft" if item == items[-1] else "next_topic"}
@@ -169,7 +182,7 @@ class AgentExecution:
             return []
         jobs = []
         for task in session.tasks.values():
-            all_messages = task.kind in (TaskKind.INTEGRATION, TaskKind.DRAFT)
+            all_messages = task.kind in (TaskKind.INTEGRATION, TaskKind.DRAFT, TaskKind.SCORING)
             messages = history if all_messages else [m for m in history if m.seq in task.message_seqs]
             previous = session.drafts[-1] if session.drafts and all_messages else None
             issues = self._review_issues(session, previous.draft_id, history) if previous else []
@@ -189,6 +202,7 @@ class AgentExecution:
     def _prior_issue(session, issue, owner) -> PriorIssue:
         closing = next((m.text for m in session.messages if m.seq == issue.closed_by_seq), None)
         return PriorIssue(issue_id=issue.issue_id, severity="blocking" if issue.severity.value == "blocking" else "advisory",
+                          kind=getattr(getattr(issue, "kind", None), "value", "fact"),
                           target_item="background", description=issue.summary,
                           owner_role=ROLE_ALIASES.get(owner, owner),
                           closure_condition=issue.summary,
@@ -229,7 +243,8 @@ class AgentExecution:
         messages = [m for m in messages if m.text.strip()]
         visible = {m.seq for m in messages}
         request = RoleRequest(
-            role=ROLE_ALIASES.get(role, role), logical_task_id=task_id, session_id=session.session_id,
+            role=ROLE_ALIASES.get(role, role), kind=kind,
+            logical_task_id=task_id, session_id=session.session_id,
             input_version=session.input_version, topic_id=topic_id, topic=topic, user_input=idea,
             round=max(1, session.round_no), messages=[
                 SourceMessage(session_id=session.session_id, input_version=m.input_version, seq=m.seq,
@@ -275,6 +290,7 @@ class AgentExecution:
             if task.kind == TaskKind.CHALLENGE:
                 payload["raised_issues"] = [{"issue_id": f"I-{task.round_no}-{task.task_id.rsplit(':', 1)[-1]}",
                                              "topic_id": task.topic_id, "raised_by": job.role, "severity": "major",
+                                             "kind": output.get("divergence", "fact"),
                                              "summary": f"{output['text']} {output['verification']}",
                                              "source_seqs": output["source_seqs"]}]
             elif task.kind == TaskKind.RESPONSE:
@@ -282,6 +298,15 @@ class AgentExecution:
                 if verification := output.get("verification"):
                     payload["text"] = f"{payload['text']}\n验证方法：{verification}"
                     payload["evidence"] = [verification]
+            elif task.kind == TaskKind.SCORING:
+                scorecard = output.get("scorecard") or {}
+                payload["scorecard"] = {
+                    "options": scorecard.get("options", []),
+                    "rationale": scorecard.get("rationale", ""),
+                }
+                payload["item_refs"] = [
+                    str(option.get("option_id", "")) for option in payload["scorecard"]["options"]
+                ]
             elif task.kind == TaskKind.DRAFT:
                 content = output["content"]
                 payload["draft_content"] = {**content, "requirements": [
@@ -289,6 +314,10 @@ class AgentExecution:
                 ], "removed_requirement_ids": [change["previous_id"] for change in output["requirement_changes"]
                                                 if change["previous_id"] not in output["source_map"]]}
                 payload["item_refs"] = list(output["source_map"])
+                # 分歧记录随草稿版本落库，导出 DesignSpecContent 时不会带出。
+                payload["agreements"] = output.get("agreements", [])
+                payload["alternatives"] = output.get("alternatives", [])
+                payload["disagreements"] = output.get("disagreements", [])
             action = "submit_output"
 
         def is_current(session):

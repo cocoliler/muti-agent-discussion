@@ -8,10 +8,11 @@
 
 | 模块 | 内容 |
 | --- | --- |
-| `enums.py` | 角色、阶段、回合、任务类型、消息类型、严重度、问题状态、评审结论、调度动作、原因码 |
+| `enums.py` | 角色、阶段、回合、任务类型、消息类型、严重度、分歧类型、问题状态、评审结论、调度动作、原因码、轮次硬上限 |
 | `models.py` | 议题、消息、问题、角色任务与结果、草稿版本、评审结果、主持人调度卡、编排决策 |
 | `state_machine.py` | 允许的状态迁移表、暂停/恢复判定、非法迁移异常 |
 | `validation.py` | 引用归属、议题结构、点名范围、成稿门禁等纯校验 |
+| `scoring.py` | 权衡分歧的五维加权打分、权重归一化与确定性排名 |
 | `engine.py` | 编排引擎，唯一的状态入口 |
 
 ## 2. 目录
@@ -61,6 +62,8 @@ stateDiagram-v2
 
 质疑者每回合至少给出一个指向具体发言或用户输入的问题；记录员在每个形成新共识的回合参与整合。因此“必需发言 + 质疑 + 整合”齐备后才允许成稿。
 
+轮次有硬上限（`DiscussionSession.max_directed_rounds` / `max_revision_rounds`，默认各 2 轮，可由后端通过 `DISCUSSION_MAX_DIRECTED_ROUNDS` / `DISCUSSION_MAX_REVISION_ROUNDS` 覆盖）：定向补充轮超限返回 `ROUND_LIMIT`；评审再次退回且修订轮已用尽时直接转人工澄清，不进入下一轮修订。这样即使评审每轮换个措辞提新问题，也不会无限循环。
+
 ## 5. 校验规则
 
 | 场景 | 规则 | 可观察结果 |
@@ -74,6 +77,9 @@ stateDiagram-v2
 | 问题关闭 | 阻断问题必须带 `evidence` 才能由回应关闭 | 缺少证据返回 `MISSING_EVIDENCE` |
 | 评审 | 通过结论不得附带阻断发现，签收要求同版本 PASS 评审 | `REVIEW_PASS_WITH_BLOCKING` / `REVIEW_NOT_PASSED` |
 | 修订收敛 | 同一输入版本再次出现相同规格正文和同一组未解决评审项时，生成澄清问题 | `AWAITING_USER_INPUT` |
+| 轮次上限 | 定向补充轮与修订轮都有硬上限；超限时定向轮返回 `ROUND_LIMIT`，修订轮转人工澄清 | `detail.remaining_*_rounds` 给出余量；修订超限时 `detail.escalated="revision_limit"` |
+| 价值分歧 | `Issue.kind=value` 的问题标记为待用户裁决，不允许点名角色回应，也不能成稿 | `ISSUE_NEEDS_USER` / `VALUE_DIVERGENCE_UNRESOLVED` |
+| 权衡打分 | `Issue.kind=tradeoff` 的问题不能点名；成稿或切议题前必须由主持人提交评分卡，按用户价值/可行性/成本/差异化/风险加权，最高分方案被采纳，相关分歧自动关闭 | 缺评分卡时 `submit_candidate_draft` / `move_to_next_topic` 改为派发 `SCORING` 任务；`detail.ranking` 返回排名，不合格返回 `INVALID_SCORECARD` |
 
 人工澄清与多议题调度的行为约定：
 
@@ -89,6 +95,10 @@ stateDiagram-v2
 4. **问题关闭要有依据**：关闭阻断问题需要证据或可验证的处理方式。
 5. **自动执行批次**：角色执行器每批最多调用 32 次。讨论仍需推进时，执行器自动开启下一批。
 6. **草稿版本化**：每次送审生成新的 `DraftRevision`（`parent_id` 指向上一版），旧版本 `current=False`；签收只认当前版本 + 同版本 PASS 评审。
+7. **分歧记录随稿留存**：记录员返回的 `agreements` / `alternatives` / `disagreements` 落到 `DraftRevision`，供界面展示与签收归档；导出 `DesignSpecContent` 时不含这些字段。
+8. **轮次有限**：定向补充与修订都有硬上限，超限只能提交候选稿或交用户裁决。
+9. **打分确定性**：同一份评分卡与权重永远得到同一个排名（同分先比用户价值，再按 `option_id`），权重默认 0.30/0.25/0.15/0.15/0.15。
+10. **决策可追溯**：`DraftRevision.scorecard_id` / `chosen_option_id` 记录该版本依据的评分卡与被采纳方案，导出正文不含这些字段。
 
 ## 7. 使用示例
 

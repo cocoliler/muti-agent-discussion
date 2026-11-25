@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from backend.discussions import routes
 from backend.main import app
 from backend.roles.contracts import SPEC_VALIDATOR
+from spec_handoff import content_hash, dump_text
 
 
 class SignedSpecExportTests(unittest.TestCase):
@@ -44,6 +45,47 @@ class SignedSpecExportTests(unittest.TestCase):
         content = json.loads(download.content.decode("utf-8"))
         SPEC_VALIDATOR.validate(content)
         self.assertEqual(content, json.loads(self.service.repo.get_handoff(self.sid)["content_json"]))
+        # 导出文本必须就是 FlowStudio「导入规格 JSON」读取的那份正文。
+        self.assertEqual(download.text, dump_text(content))
+        self.assertTrue(download.text.startswith('{\n  "schema_version": "1.0"'))
+        self.assertNotIn("source_seqs", download.text)
+        self.assertNotIn("\r\n", download.text)
+        self.assertEqual(download.headers["x-content-hash"], content_hash(content))
+        self.assertLess(len(download.content), 1024 * 1024)
+
+    def test_export_any_draft_before_signoff(self):
+        state = self.workbench.get(self.path).json()
+        draft_id = state["active_draft"]["draft_id"]
+
+        download = self.workbench.get(f"{self.path}/export?draft_id={draft_id}")
+
+        self.assertEqual(download.status_code, 200)
+        content = json.loads(download.content.decode("utf-8"))
+        SPEC_VALIDATOR.validate(content)
+        self.assertEqual(download.text, dump_text(content))
+        self.assertNotIn("source_seqs", download.text)
+        self.assertEqual(download.headers["x-content-hash"], content_hash(content))
+        # 未签收时默认导出仍然拒绝；未知草稿版本返回 404。
+        self.assertEqual(self.workbench.get(self.path + "/export").status_code, 409)
+        self.assertEqual(self.workbench.get(self.path + "/export?draft_id=missing").status_code, 404)
+
+    def test_demo_export_is_importable(self):
+        sid = str(uuid4())
+        self.assertEqual(self.workbench.put(f"/api/demo/{sid}").status_code, 200)
+        for stage in range(4):
+            advanced = self.workbench.post(
+                f"/api/demo/{sid}/advance", json={"expected_stage": stage}
+            )
+            self.assertEqual(advanced.status_code, 200)
+        confirmed = self.workbench.post(f"/api/demo/{sid}/confirm", json={"revision": 2})
+        self.assertEqual(confirmed.status_code, 200)
+
+        download = self.workbench.get(f"/api/demo/{sid}/export")
+        self.assertEqual(download.status_code, 200)
+        content = json.loads(download.content.decode("utf-8"))
+        SPEC_VALIDATOR.validate(content)
+        self.assertEqual(download.text, dump_text(content))
+        self.assertEqual(download.headers["x-content-hash"], content_hash(content))
 
     def test_workbench_downloads_only_the_signed_spec(self):
         self.assertIsNone(self.workbench.get(self.path).json().get("export_url"))

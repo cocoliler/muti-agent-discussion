@@ -30,6 +30,8 @@ install(app, with_export=True)  # 正式工作台启用签收后的下载；嵌�
 
 存储路径由环境变量 `DISCUSSION_DB` 决定，默认 `backend/.data/discussions.sqlite3`。首次连接自动建表；启动时把上次未终结的调用置为 `FAILED` / `PROCESS_INTERRUPTED`，避免前端一直看到「运行中」。
 
+轮次硬上限由 `DISCUSSION_MAX_DIRECTED_ROUNDS` / `DISCUSSION_MAX_REVISION_ROUNDS` 指定（默认各 2）：定向补充超限返回 `ROUND_LIMIT`；评审再次退回且修订轮用尽时转人工澄清。价值分歧（`Issue.kind=value`）不走点名回应，直接进澄清卡交用户裁决。权衡分歧（`Issue.kind=tradeoff`）在成稿或切议题前自动派发一次主持人 `SCORING` 任务，按五个维度加权排名，会话详情里的 `scorecard` 返回各方案得分与被采纳方案。模拟模式下可用 `DISCUSSION_SIMULATE_DIVERGENCE=tradeoff`（或 `value`）复现这两条支路。记录员保留的 `agreements` / `alternatives` / `disagreements` 随草稿版本返回，仅用于展示，不进入导出正文。
+
 ## 接口
 
 讨论的 6 项操作对应 `FLOWSTUDIO_DESIGN_INPUT.md` §6。正式工作台额外启用签收规格下载。
@@ -42,9 +44,11 @@ install(app, with_export=True)  # 正式工作台启用签收后的下载；嵌�
 | POST | `/api/v1/discussions/{id}/messages` | 200 | 用户补充/回复，带上下文 `input_version` |
 | POST | `/api/v1/discussions/{id}/actions` | 200 | `pause`/`resume`/`cancel`/`require_changes`/`submit_*` |
 | POST | `/api/v1/discussions/{id}/confirm` | 200 | 签收：先过 `spec_handoff.sign_off` 门禁，通过后写 `spec_handoffs`（含正文与 `content_hash`） |
-| GET | `/api/v1/discussions/{id}/export` | 200 | 下载已签收的 UTF-8 `DesignSpecContent` 正文；未签收时返回 409 |
+| GET | `/api/v1/discussions/{id}/export?draft_id=` | 200 | 下载 `DesignSpecContent` 正文：缺省导已签收版本（未签收 409）；带 `draft_id` 可导任意草稿版本（未知 404） |
 
 签收回执的 `handoff.export_url` 和已完成会话详情的 `export_url` 都指向下载入口。下载使用签收时保存的正文，哈希及交接信息保存在签收记录中。
+
+下载不走 `JSONResponse` 直接序列化，而是复用 `spec_handoff.export`：契约字段顺序、2 空格缩进、UTF-8 无 BOM、LF 行尾，写出前再跑一次结构 + 1 MiB 校验（不通过返回 409）。因此下载到的 `design-spec.json` 可**直接**用 FlowStudio「导入规格 JSON」加载；响应头 `X-Content-Hash` 与 FlowStudio `content_hash()` 同算法，可用于比对 `SpecRevision.hash`。
 
 所有写命令要求 `Idempotency-Key`（UUID），scope 为「HTTP 方法 + 资源路径」：同键同体回放原响应，同键异体返回 409 `IDEMPOTENCY_CONFLICT`，入参校验失败不占用键。
 

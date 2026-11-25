@@ -10,6 +10,7 @@ from typing import Mapping
 
 from .enums import (
     NAMABLE_ROLES,
+    DivergenceKind,
     IssueStatus,
     ReasonCode,
     Role,
@@ -132,6 +133,16 @@ def validate_assignments(
                     ReasonCode.ISSUE_NEEDS_USER,
                     f"问题 {issue_id} 需要用户补充事实，不能点名角色回应",
                 )
+            if issue.kind == DivergenceKind.VALUE:
+                return (
+                    ReasonCode.ISSUE_NEEDS_USER,
+                    f"问题 {issue_id} 属于价值分歧，只能由用户裁决",
+                )
+            if issue.kind == DivergenceKind.TRADEOFF:
+                return (
+                    ReasonCode.SCORING_REQUIRED,
+                    f"问题 {issue_id} 属于权衡分歧，需先按维度打分再决定",
+                )
             if issue.status != IssueStatus.OPEN:
                 return (
                     ReasonCode.ISSUE_ALREADY_CLOSED,
@@ -183,7 +194,7 @@ def unchallenged_topics(session: DiscussionSession) -> tuple[str, ...]:
 
 
 def draft_blockers(session: DiscussionSession) -> tuple[ReasonCode, ...]:
-    """候选稿成稿门禁：必需发言、质疑、阻断问题三者齐备。"""
+    """候选稿成稿门禁：必需发言、质疑、阻断问题、价值分歧四者齐备。"""
 
     blockers: list[ReasonCode] = []
     if missing_statements(session):
@@ -197,6 +208,13 @@ def draft_blockers(session: DiscussionSession) -> tuple[ReasonCode, ...]:
         for issue in session.issues.values()
     ):
         blockers.append(ReasonCode.OPEN_BLOCKING_ISSUES)
+    if any(
+        issue.status == IssueStatus.OPEN
+        and issue.kind == DivergenceKind.VALUE
+        and issue.input_version == session.input_version
+        for issue in session.issues.values()
+    ):
+        blockers.append(ReasonCode.VALUE_DIVERGENCE_UNRESOLVED)
     return tuple(blockers)
 
 

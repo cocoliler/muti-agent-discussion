@@ -144,6 +144,19 @@
 .review-finding button { padding: 3px 6px; color: var(--accent); }
 .review-finding p { margin-top: 6px; }
 .spec-actions { display: grid; gap: 10px; padding: 12px 16px; background: #fbfcf8; border-top: 1px solid var(--border); }
+.spec-export { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.workbench-shell .spec-export button { padding: 6px 10px; font-size: 13px; }
+.spec-export span { color: var(--muted); font-size: 12px; }
+.spec-export p { flex-basis: 100%; margin: 0; color: #9c3740; font-size: 12px; }
+.scorecard { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.scorecard ol { margin: 4px 0 0; padding-left: 20px; font-size: 13px; }
+.scorecard li { margin-top: 4px; color: var(--muted); }
+.scorecard li.chosen { color: #1f4d2b; font-weight: 600; }
+.scorecard .tag { margin-left: 6px; padding: 1px 6px; border-radius: 8px; background: #e3f1e6; color: #1f4d2b; font-size: 11px; }
+.scorecard-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+.divergence { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.divergence ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; color: #6b5a2e; }
+.divergence li { margin-top: 2px; }
 @media (max-width: 1000px) {
   .workbench-shell .live-workspace { grid-template-columns: 164px minmax(0, 1fr) minmax(280px, 32vw); }
   .workbench-shell .rail { padding-inline: 10px; }

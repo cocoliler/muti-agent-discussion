@@ -2,6 +2,16 @@
 .tmp/
 __pycache__/
 *.py[cod]
+*.sqlite3
 backend/.data/
+node_modules/
+frontend/dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 /.env
-/.env
+.env.local
+.DS_Store
+Thumbs.db

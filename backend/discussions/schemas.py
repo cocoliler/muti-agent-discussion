@@ -98,6 +98,13 @@ class DraftSummary(_Strict):
     open_issue_ids: list[str] = Field(default_factory=list)
     review_verdict: str | None = None
     content: dict[str, Any] = Field(default_factory=dict)
+    #: 记录员保留的共识、备选项与未收敛分歧，仅用于展示，不进入导出正文。
+    agreements: list[str] = Field(default_factory=list)
+    alternatives: list[str] = Field(default_factory=list)
+    disagreements: list[str] = Field(default_factory=list)
+    #: 本版本依据的评分卡与被采纳方案，未打分时为空。
+    scorecard_id: str | None = None
+    chosen_option_id: str | None = None
 
 
 class DraftHistoryItem(_Strict):
@@ -114,6 +121,24 @@ class ReviewSummary(_Strict):
     input_version: int
     verdict: str
     findings: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ScoredOptionView(_Strict):
+    option_id: str
+    title: str
+    scores: dict[str, int] = Field(default_factory=dict)
+    total: float
+    rank: int
+
+
+class ScorecardView(_Strict):
+    scorecard_id: str
+    topic_id: str
+    input_version: int
+    chosen_option_id: str
+    rationale: str = ""
+    weights: dict[str, float] = Field(default_factory=dict)
+    options: list[ScoredOptionView] = Field(default_factory=list)
 
 
 class DecisionView(_Strict):
@@ -150,6 +175,7 @@ class SessionView(_Strict):
     pending_tasks: list[dict[str, Any]] = Field(default_factory=list)
     agent_mode: str = "simulation"
     active_draft: DraftSummary | None = None
+    scorecard: ScorecardView | None = None
     drafts: list[DraftHistoryItem] = Field(default_factory=list)
     reviews: list[ReviewSummary] = Field(default_factory=list)
     open_issues: list[dict[str, Any]] = Field(default_factory=list)
