@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
-import { ApiError, api, discussionPath, readMessages } from './discussions';
-import type { Action, ClarificationAnswer, Decision, Draft, Finding, Handoff, Message, Session, Task } from './discussions';
+import { ApiError, api, deleteDiscussion, discussionPath, readMessages } from './discussions';
+import type { Action, ClarificationAnswer, Decision, Finding, Handoff, Message, Session, Task } from './discussions';
 import { DiscussionSpec } from './DiscussionSpec';
 import { ClarificationForm } from './ClarificationForm';
 import { DiscussionMessageText } from './DiscussionMessageText';
+import { LocalDiscussionHistory } from './LocalDiscussionHistory';
 import './workbench.css';
 
 const statusLabels: Record<string, string> = {
-  clarifying: '澄清需求', discussing: '讨论中', reviewing: '评审中', awaiting_confirmation: '待签收',
+  clarifying: '澄清需求', discussing: '讨论中', reviewing: '评审中', awaiting_confirmation: '待人工审阅',
   completed: '已签收', paused: '已暂停', canceled: '已取消',
 };
 const waitingLabels: Record<string, string> = {
@@ -19,7 +20,7 @@ const phaseLabels: Record<string, string> = {
 };
 const agentPhaseLabels: Record<string, string> = {
   statements: '专业角色正在并行发言', challenge: '质疑者正在审视本轮发言', responses: '专业角色正在回应问题',
-  integration: '记录员正在整合讨论', drafting: '记录员正在撰写规格',
+  stances: '专业角色正在独立比较方案', integration: '记录员正在整合讨论', drafting: '记录员正在撰写规格',
 };
 const roleLabels: Record<string, string> = {
   user: '你', host: '主持人', product: '产品经理', research: '用户研究员', architect: '技术架构师',
@@ -35,11 +36,12 @@ const participantLabels: Record<string, string> = {
 };
 const kindLabels: Record<string, string> = {
   user_input: '用户输入', agenda: '议题', clarification: '澄清', statement: '发言', challenge: '质疑',
-  response: '回应', integration: '整合', draft: '草稿', review: '评审', decision: '决定', system: '系统',
+  response: '回应', stance: '方案立场', integration: '整合', draft: '草稿', review: '评审', decision: '决定', system: '系统',
 };
-const taskLabels = { ...kindLabels, statement: '专业角色发言', integration: '整合讨论结果', draft: '撰写规格草稿' } as Record<string, string>;
+const taskLabels = { ...kindLabels, statement: '专业角色发言', integration: '整合讨论结果', scoring: '方案比较与评分', draft: '撰写规格草稿' } as Record<string, string>;
 const storageKey = 'design-room.discussion';
 const projectKey = 'design-room.project';
+const specVisibilityKey = 'design-room.spec-visibility';
 const defaultActions = [
   ['submit_agenda', '提交主持人议题'], ['propose', '提交主持人调度'],
   ['submit_output', '提交角色结果'], ['submit_review', '提交评审结论'], ['abandon_task', '放弃角色任务'],
@@ -76,7 +78,6 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [projectId, setProjectId] = useState(() => readStorage(projectKey) ?? crypto.randomUUID());
   const [session, setSession] = useState<Session | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [snapshots, setSnapshots] = useState<Record<string, Draft>>({});
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskSelection, setTaskSelection] = useState<{ role: string; task?: Task } | null>(null);
   const taskDialog = useRef<HTMLDialogElement>(null);
@@ -87,6 +88,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [substantive, setSubstantive] = useState(true);
   const [highlight, setHighlight] = useState<number | null>(null);
   const [itemRef, setItemRef] = useState<{ value: string } | null>(null);
+  const [specCollapsed, setSpecCollapsed] = useState(() => readStorage(specVisibilityKey) === 'collapsed');
+  const revealSpec = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [readError, setReadError] = useState('');
@@ -142,11 +145,6 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   }, [id]);
 
   useEffect(() => {
-    const draft = session?.active_draft;
-    if (draft) setSnapshots((current) => ({ ...current, [draft.draft_id]: draft }));
-  }, [session?.active_draft]);
-
-  useEffect(() => {
     const list = thread.current;
     if (!list || !shouldScroll.current) return;
     const clarification = list.querySelector(':scope > .clarification-card:not([hidden])');
@@ -159,13 +157,12 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     if (taskSelection && !taskDialog.current?.open) taskDialog.current?.showModal();
   }, [taskSelection]);
 
-  function clearSession() {
+  function selectSession(nextId: string | null) {
     sessionRead.current?.abort();
-    saveStorage(storageKey, null);
-    setId(null);
+    saveStorage(storageKey, nextId);
+    setId(nextId);
     setSession(null);
     setMessages([]);
-    setSnapshots({});
     setTasks([]);
     setTaskSelection(null);
     setHandoff(null);
@@ -184,7 +181,31 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     setItemRef(null);
     shouldScroll.current = true;
     pending.current = null;
-    requestAnimationFrame(() => projectIdeaField.current?.focus());
+    if (!nextId) requestAnimationFrame(() => projectIdeaField.current?.focus());
+  }
+
+  function setSpecVisibility(collapsed: boolean) {
+    setSpecCollapsed(collapsed);
+    saveStorage(specVisibilityKey, collapsed ? 'collapsed' : null);
+  }
+
+  function collapseSpec() {
+    setSpecVisibility(true);
+    requestAnimationFrame(() => revealSpec.current?.focus());
+  }
+
+  function showSpec() {
+    setSpecVisibility(false);
+    requestAnimationFrame(() => {
+      const title = document.getElementById('live-spec-title');
+      title?.focus({ preventScroll: true });
+      title?.scrollIntoView({ block: 'nearest' });
+    });
+  }
+
+  function showReference(value: string) {
+    setSpecVisibility(false);
+    setItemRef({ value });
   }
 
   async function write<T>(path: string, body: object, onResult: (result: T) => void) {
@@ -269,7 +290,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const promptsBySeq = new Set(messages.filter((message) => message.kind === 'clarification').map((message) => message.seq));
   const latestAnswers = new Map<number, Message>();
   for (const message of messages) {
-    if (message.role === 'user' && message.kind === 'user_input' && message.reply_to_seq !== null
+    if (message.role === 'user' && message.kind === 'user_input' && message.substantive !== false && message.reply_to_seq !== null
         && promptsBySeq.has(message.reply_to_seq)) latestAnswers.set(message.reply_to_seq, message);
   }
   const editableAnswers = session?.superseded_answer_seqs && !terminal && !paused
@@ -293,7 +314,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     ? message.task_id === selectedTask.task_id || selectedTask.message_seqs?.includes(message.seq)
     : message.role === taskSelection.role).slice(-5) : [];
   const activeDraft = session?.active_draft;
-  const canConfirm = session?.status === 'awaiting_confirmation' && activeDraft?.review_verdict === 'pass'
+  const canConfirm = session?.status === 'awaiting_confirmation' && activeDraft != null
+    && (activeDraft.review_verdict === 'pass' || activeDraft.review_verdict === 'revise')
     && activeDraft.input_version === session.input_version;
   const awaitingClarification = session?.status === 'clarifying' && session.waiting_for === 'user_input';
   const clarificationMessage = awaitingClarification ? messages.filter((message) => message.kind === 'clarification'
@@ -314,8 +336,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const agentRunning = hostWorking || session?.participants.some((person) => isWorkingRole(person.role) && person.status === 'running');
   const failedAgent = session?.participants.find((person) => person.status === 'failed' && (
     isWorkingRole(person.role)));
-  const projectIdea = messages.find((message) => message.kind === 'user_input')?.text;
-  const latestIdea = messages.filter((message) => message.kind === 'user_input').at(-1)?.text.trim() ?? '';
+  const projectIdea = messages.find((message) => message.kind === 'user_input' && message.substantive !== false)?.text;
+  const latestIdea = messages.filter((message) => message.kind === 'user_input' && message.substantive !== false).at(-1)?.text.trim() ?? '';
   const editingAgenda = agendaDraft !== null && agendaDraft.version === session?.input_version;
   const agendaText = editingAgenda ? agendaDraft.text : latestIdea;
   const startDiscussion = () => {
@@ -330,8 +352,10 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     : agentsEnabled && (waitingForAgenda || autoExchange) && failedAgent && !agentRunning ? '有 Agent 执行失败'
       : waitingForAgenda ? (agentsEnabled ? '主持人正在整理议题' : '准备开始讨论')
         : autoExchange ? (session.waiting_for === 'review' ? '独立评审正在检查规格'
-          : session.waiting_for === 'host_decision' ? '等待下一步调度' : agentPhaseLabels[session.phase ?? ''] ?? 'Agent 正在处理')
-        : session?.status === 'awaiting_confirmation' ? '待审阅并签收'
+          : session.waiting_for === 'host_decision' ? '等待下一步调度'
+          : currentTasks.some((task) => task.kind === 'scoring') ? '主持人正在比较备选方案'
+            : agentPhaseLabels[session.phase ?? ''] ?? 'Agent 正在处理')
+        : session?.status === 'awaiting_confirmation' ? (activeDraft?.review_verdict === 'revise' ? '建议修订，可签收或退回' : '待签收或退回')
           : session && waitingLabels[session.waiting_for];
 
   return <div className="shell workbench-shell">
@@ -339,11 +363,34 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
       <div className="brand"><span className="brand-icon" aria-hidden="true">✳</span><div><strong>Design Room</strong><small>多 Agent 需求工作台</small></div></div>
       <div className="top-actions"><button disabled={busy} onClick={openDemo}>会议室演示</button></div>
     </header>
-    <div className="workspace live-workspace">
+    <div className={`workspace live-workspace${specCollapsed ? ' spec-collapsed' : ''}`}>
       <aside className="rail" aria-label="讨论状态和参与者">
-        <h2>当前会话</h2>
+        <div className="rail-toolbar">
+          <h2>当前会话</h2>
+          {id && <button type="button" className="primary new-chat" disabled={busy}
+            onClick={() => selectSession(null)}>＋ 新聊天</button>}
+        </div>
         <div className="session-status"><strong>{projectIdea || (session ? '项目讨论' : '新讨论')}</strong>
           {session && <p>{statusLabels[session.status] ?? session.status} · 输入 v{session.input_version}{session.round_no > 0 && ` · 第 ${session.round_no} 轮`}</p>}</div>
+        <LocalDiscussionHistory activeId={id} activeStatus={session?.status} labels={statusLabels} disabled={busy}
+          activeDiscussion={session?.id === id && session ? {
+            id: session.id, project_id: session.project_id, title: projectIdea?.slice(0, 120) || '项目讨论',
+            status: session.status, round_no: session.round_no, updated_at: '',
+          } : undefined}
+          onOpen={(discussion) => {
+            setProjectId(discussion.project_id);
+            saveStorage(projectKey, discussion.project_id);
+            selectSession(discussion.id);
+          }}
+          onDelete={async (discussion) => {
+            setBusy(true);
+            try {
+              await deleteDiscussion(discussion.id);
+              selectSession(null);
+            } finally {
+              setBusy(false);
+            }
+          }} />
         {session && <><h2>参与角色</h2><ul className="roles">{session.participants.map((person) => {
           const task = currentTasks.find((item) => item.role === person.role);
           const name = roleLabels[person.role] ?? person.role;
@@ -387,9 +434,12 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
       </aside>
       <main className="discussion">
         <header className="pane-title"><div><h1>项目讨论</h1>{session?.phase && <p>{phaseLabels[session.phase] ?? session.phase}</p>}</div>
-          {id && <div className="pane-actions">
-            {session && <><span className="count">{session.last_seq} 条消息</span><a href="#live-spec-title">查看规格</a></>}
-            <button className="primary new-chat" disabled={busy} onClick={clearSession}>＋ 新聊天</button>
+          {(session || specCollapsed) && <div className="pane-actions">
+            {session && <span className="count">{session.last_seq} 条消息</span>}
+            {specCollapsed
+              ? <button type="button" className="spec-toggle" ref={revealSpec} aria-controls="live-spec-panel"
+                  aria-expanded={false} onClick={showSpec}>展开规格</button>
+              : <a href="#live-spec-title">查看规格</a>}
           </div>}</header>
         <div ref={thread} className="thread" aria-label="讨论消息" onScroll={(event) => {
           const element = event.currentTarget;
@@ -398,7 +448,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
           {id ? messages.map((message) => <article key={message.seq} id={`message-${message.seq}`} tabIndex={-1}
             className={`message${highlight === message.seq ? ' highlight' : ''}`}>
             <Avatar role={message.role} /><div className="message-body"><header><strong>{roleLabels[message.role] ?? message.role}</strong>
-              <span className="event-label">{supersededAnswers.has(message.seq) ? '答案已替换' : kindLabels[message.kind] ?? message.kind}</span><span className="sequence">#{message.seq}</span>
+              <span className="event-label">{supersededAnswers.has(message.seq) ? '答案已替换' : message.substantive === false ? '随手备注' : kindLabels[message.kind] ?? message.kind}</span><span className="sequence">#{message.seq}</span>
               {editableAnswers.includes(message) && editMessage !== message && <button className="message-edit" disabled={busy}
                 onClick={() => reanswer(message.seq)}>修改回答</button>}
             </header>
@@ -414,10 +464,16 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
                   text, reply_to_seq: message.reply_to_seq, replaces_answer_seq: message.seq,
                   clarification_answers: answers, substantive: true, input_version: session.input_version,
                 }, () => { setAnswerToEdit(null); shouldScroll.current = true; })} />
-              : <><DiscussionMessageText text={message.text} formatted={message.role !== 'user' && message.kind !== 'system'} /><div className="references">
+              : <>{message.role === 'user' && !!session?.clarification_answers?.[message.seq]?.length
+                ? <div className="clarification-replies">{session.clarification_answers[message.seq].map((entry, index) => <div key={index}>
+                    <DiscussionMessageText text={entry.question} formatted />
+                    <p><strong>回答</strong> {entry.answer}</p>
+                  </div>)}</div>
+                : <DiscussionMessageText text={message.text} formatted={message.role !== 'user' && message.kind !== 'system'} />}
+                <div className="references">
                 {[...new Set([...(message.source_seqs ?? []), ...(message.reply_to_seq ? [message.reply_to_seq] : [])])].map((seq) =>
                   <button key={seq} onClick={() => locate(seq)} aria-label={`定位消息 ${seq}`}>#{seq}</button>)}
-                {message.item_refs?.map((item) => <button key={item} onClick={() => setItemRef({ value: item })}>{item}</button>)}
+                {message.item_refs?.map((item) => <button key={item} onClick={() => showReference(item)}>{item}</button>)}
                 {message.issue_ids?.map((issue) => <span key={issue}>{issue}</span>)}
                 {session && !terminal && !paused && <button onClick={() => setReply(message.seq)}>回复 #{message.seq}</button>}
               </div></>}
@@ -425,6 +481,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
             <h2>你想做什么产品？</h2>
             <label>项目想法<textarea ref={projectIdeaField} required maxLength={4000} rows={4} placeholder="例如：做一个内部会议室预约工具，首版支持查空闲和预约。" value={idea} onChange={(event) => setIdea(event.target.value)} /></label>
             <details className="project-settings"><summary>项目设置</summary><label>项目 ID（UUID）<input value={projectId} onChange={(event) => setProjectId(event.target.value)} /></label></details>
+            <p className="model-disclosure">真实模型模式会将项目输入和任务所需的讨论内容发送给 DeepSeek。请勿填写密钥或未经授权的客户资料。</p>
             <button className="primary" disabled={busy || !idea.trim() || !projectId.trim()}>创建讨论</button>
           </form>}
           {id && !session && !readError && <p role="status">正在恢复讨论…</p>}
@@ -438,12 +495,17 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
             <div className="next-step-heading"><span className="step-symbol" aria-hidden="true">{terminal ? '✓' : '↳'}</span><div>
               <h2 id="next-step-title" role="status">{nextStep}</h2>
               {agentsEnabled && (waitingForAgenda || autoExchange) && <p>{session.agent_mode === 'simulation' ? '模拟 Agent' : '模型 Agent'}生成的发言会自动显示在讨论中。</p>}
+              {failedAgent?.error_code === 'AGENT_NO_PROGRESS' && <p>这次执行没有推进待处理任务，已停止自动重复调用。</p>}
               {failedAgent?.error_code === 'PROVIDER_CONFIG' && <p>请检查后端的 DeepSeek 密钥和模型名配置。</p>}
-              {failedAgent?.diagnostic && <p>输出校验失败：{failedAgent.diagnostic}</p>}
+              {failedAgent?.diagnostic && <p>{/^missing at (?:source_seqs|findings\/\d+\/source_seqs)$/.test(failedAgent.diagnostic)
+                ? `${roleLabels[failedAgent.role] ?? failedAgent.role}的输出缺少消息引用，重试会重新核对引用。`
+                : failedAgent.diagnostic.startsWith('requirement_changes')
+                  ? '记录员的需求变更记录未通过校验，重试会重新核对旧需求的去向。'
+                  : `输出校验失败：${failedAgent.diagnostic}`}</p>}
               {session.waiting_for === 'role_results' && !paused && !autoExchange && <p>收到角色结果后，会显示在讨论中。</p>}
             </div></div>
             {!paused && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent ? '重试 Agent' : '继续执行 Agent'}</button>}
-            {canConfirm && <a href="#live-spec-title">查看待签收规格</a>}
+            {session.status === 'awaiting_confirmation' && <a href="#live-spec-title" onClick={(event) => { event.preventDefault(); showSpec(); }}>查看待审阅规格</a>}
             {waitingForAgenda && !agentsEnabled && <form className="live-form agenda-form" onSubmit={(event) => {
               event.preventDefault();
               startDiscussion();
@@ -463,7 +525,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
         {((error && !clarificationKey && !editMessage) || readError || findings.length > 0) && <div className="error workbench-error" role="alert">
           {error && !clarificationKey && !editMessage && <p>{error}</p>}{readError && <p>{readError} {id && <button onClick={() => void refresh.current()}>重新读取</button>}</p>}
           {findings.length > 0 && <ul>{findings.map((finding, index) => <li key={index}>
-            {finding.path ? <button onClick={() => setItemRef({ value: finding.path! })}>{finding.path}</button> : finding.code} {finding.message}
+            {finding.path ? <button onClick={() => showReference(finding.path!)}>{finding.path}</button> : finding.code} {finding.message}
           </li>)}</ul>}
         </div>}
         {session && !terminal && <footer className="workbench-controls">
@@ -482,11 +544,11 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
           </div>
         </footer>}
       </main>
-      <DiscussionSpec key={id} session={session} snapshots={snapshots} handoff={handoff} locate={locate} itemRef={itemRef} busy={busy}
+      <DiscussionSpec key={id} collapsed={specCollapsed} onCollapse={collapseSpec} session={session} handoff={handoff} locate={locate} itemRef={itemRef} busy={busy}
         confirm={canConfirm ? () => command('/confirm', {
           draft_id: activeDraft.draft_id, input_version: session.input_version, spec_expected_revision: 0,
         }) : undefined}
-        requestChanges={session?.status === 'awaiting_confirmation' ? (reason) => act('require_changes', { reason }) : undefined} />
+        requestChanges={activeDraft && (session?.status === 'awaiting_confirmation' || session?.status === 'completed') ? (reason) => act('require_changes', { reason, draft_id: activeDraft?.draft_id }) : undefined} />
     </div>
     {session && taskSelection && <dialog className="task-dialog" ref={taskDialog} aria-labelledby="task-dialog-title" onClose={() => setTaskSelection(null)}>
       <header className="task-dialog-header">

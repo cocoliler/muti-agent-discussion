@@ -34,10 +34,10 @@ stateDiagram-v2
     CLARIFYING --> DISCUSSING: 议题齐备
     DISCUSSING --> CLARIFYING: 请求用户补充 / 用户实质补充
     DISCUSSING --> REVIEWING: 候选稿冻结送审
-    REVIEWING --> DISCUSSING: 评审 REVISE（只派相关角色）
     REVIEWING --> CLARIFYING: 评审 NEEDS_INPUT
-    REVIEWING --> AWAITING_CONFIRMATION: 评审 PASS
-    AWAITING_CONFIRMATION --> COMPLETED: 用户签收
+    REVIEWING --> AWAITING_CONFIRMATION: 评审 PASS 或 REVISE
+    AWAITING_CONFIRMATION --> COMPLETED: 用户签收 PASS 或 REVISE 草稿
+    COMPLETED --> DISCUSSING: 用户重新打开签收版本
     AWAITING_CONFIRMATION --> DISCUSSING: 用户要求修改
     AWAITING_CONFIRMATION --> CLARIFYING: 用户补充关键输入
     CLARIFYING --> PAUSED
@@ -62,14 +62,14 @@ stateDiagram-v2
 
 质疑者每回合至少给出一个指向具体发言或用户输入的问题；记录员在每个形成新共识的回合参与整合。因此“必需发言 + 质疑 + 整合”齐备后才允许成稿。
 
-轮次有硬上限（`DiscussionSession.max_directed_rounds` / `max_revision_rounds`，默认各 2 轮，可由后端通过 `DISCUSSION_MAX_DIRECTED_ROUNDS` / `DISCUSSION_MAX_REVISION_ROUNDS` 覆盖）：定向补充轮超限返回 `ROUND_LIMIT`；评审再次退回且修订轮已用尽时直接转人工澄清，不进入下一轮修订。这样即使评审每轮换个措辞提新问题，也不会无限循环。
+默认按收敛结果推进。可通过 `DISCUSSION_MAX_DIRECTED_ROUNDS` / `DISCUSSION_MAX_REVISION_ROUNDS` 为各输入版本启用轮次保护：定向补充轮超限返回 `ROUND_LIMIT`；评审再次退回且修订轮已用尽时直接转人工澄清，不进入下一轮修订。这样即使评审每轮换个措辞提新问题，也不会无限循环。
 
 ## 5. 校验规则
 
 | 场景 | 规则 | 可观察结果 |
 | --- | --- | --- |
 | 成稿 | `validation.draft_blockers` 同时检查缺发言（`MISSING_REQUIRED_SPEAKERS`）、缺质疑（`CHALLENGE_MISSING`）、未关闭阻断问题（`OPEN_BLOCKING_ISSUES`），送稿与写稿共用此门禁 | 任一缺口存在时返回 `DRAFT_NOT_READY`，`detail.missing_statements` 给出议题与缺失角色，`detail.blocking_issues` 给出问题 ID |
-| 评审退回 | `_revision_assignments` 按 `ReviewFinding.responsible_role` 分组，修订回合只派这些角色，质疑者复核与记录员整合按回合规则追加 | 退回后的 `Decision.tasks` 只包含负责角色，`detail.affected_roles` 列出派发范围 |
+| 人工退回 | PASS 或 REVISE 都先等待用户审阅。用户退回后按评审负责角色和补充意见派发定向修订 | 使用 `require_changes` 提交当前草稿 ID 和修订意见，REVISE 可直接采用评审意见 |
 | 输入版本 | 用户实质补充时升级 `input_version` 与 `snapshot_ref`，在途任务移入 `stale_tasks`，旧草稿标记为非当前版本 | 旧版本结果返回 `STALE_INPUT_VERSION`，`input_version`、消息序号、草稿状态均不改变 |
 | 结果归属 | `task_id + role + kind + round_no + topic_id + input_version + snapshot_ref` 全部匹配才合并 | 不匹配返回 `CROSS_SESSION_RESULT` / `CONTRACT_MISMATCH` / `STALE_ROUND` |
 | 引用 | 来源与回复只能指向本会话已提交消息 | 跨会话引用返回 `CROSS_SESSION_REFERENCE` |
@@ -77,7 +77,7 @@ stateDiagram-v2
 | 问题关闭 | 阻断问题必须带 `evidence` 才能由回应关闭 | 缺少证据返回 `MISSING_EVIDENCE` |
 | 评审 | 通过结论不得附带阻断发现，签收要求同版本 PASS 评审 | `REVIEW_PASS_WITH_BLOCKING` / `REVIEW_NOT_PASSED` |
 | 修订收敛 | 同一输入版本再次出现相同规格正文和同一组未解决评审项时，生成澄清问题 | `AWAITING_USER_INPUT` |
-| 轮次上限 | 定向补充轮与修订轮都有硬上限；超限时定向轮返回 `ROUND_LIMIT`，修订轮转人工澄清 | `detail.remaining_*_rounds` 给出余量；修订超限时 `detail.escalated="revision_limit"` |
+| 轮次上限 | 启用轮次保护后，超限时定向轮返回 `ROUND_LIMIT`，修订轮转人工澄清 | `detail.remaining_*_rounds` 给出余量；修订超限时 `detail.escalated="revision_limit"` |
 | 价值分歧 | `Issue.kind=value` 的问题标记为待用户裁决，不允许点名角色回应，也不能成稿 | `ISSUE_NEEDS_USER` / `VALUE_DIVERGENCE_UNRESOLVED` |
 | 权衡打分 | `Issue.kind=tradeoff` 的问题不能点名；成稿或切议题前必须由主持人提交评分卡，按用户价值/可行性/成本/差异化/风险加权，最高分方案被采纳，相关分歧自动关闭 | 缺评分卡时 `submit_candidate_draft` / `move_to_next_topic` 改为派发 `SCORING` 任务；`detail.ranking` 返回排名，不合格返回 `INVALID_SCORECARD` |
 
@@ -96,7 +96,7 @@ stateDiagram-v2
 5. **自动执行批次**：角色执行器每批最多调用 32 次。讨论仍需推进时，执行器自动开启下一批。
 6. **草稿版本化**：每次送审生成新的 `DraftRevision`（`parent_id` 指向上一版），旧版本 `current=False`；签收只认当前版本 + 同版本 PASS 评审。
 7. **分歧记录随稿留存**：记录员返回的 `agreements` / `alternatives` / `disagreements` 落到 `DraftRevision`，供界面展示与签收归档；导出 `DesignSpecContent` 时不含这些字段。
-8. **轮次有限**：定向补充与修订都有硬上限，超限只能提交候选稿或交用户裁决。
+8. **轮次保护可配置**：新输入重新计算定向补充和修订轮次。
 9. **打分确定性**：同一份评分卡与权重永远得到同一个排名（同分先比用户价值，再按 `option_id`），权重默认 0.30/0.25/0.15/0.15/0.15。
 10. **决策可追溯**：`DraftRevision.scorecard_id` / `chosen_option_id` 记录该版本依据的评分卡与被采纳方案，导出正文不含这些字段。
 

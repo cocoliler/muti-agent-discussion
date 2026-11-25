@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from discussion_orchestration import (
     Agenda,
@@ -29,6 +30,7 @@ from discussion_orchestration import (
     WaitingFor,
     draft_blockers,
 )
+from discussion_orchestration.models import IssueResponse
 from discussion_orchestration.validation import validate_assignments
 
 IDEA = "名称：会议室预约。用户：行政人员。目标：预约会议室。"
@@ -53,7 +55,7 @@ class RoundLimitTest(unittest.TestCase):
         session = build_session(self.engine)
         session.tasks.clear()
         session.waiting_for = WaitingFor.HOST_DECISION
-        session.directed_rounds = session.max_directed_rounds
+        session.directed_rounds = session.max_directed_rounds = 2
 
         decision = self.engine.start_directed_round(
             session, {Role.PRODUCT: ("I-1",)}, "继续补充"
@@ -68,7 +70,7 @@ class RoundLimitTest(unittest.TestCase):
         session.tasks.clear()
         session.status = SessionStatus.REVIEWING
         session.waiting_for = WaitingFor.REVIEW
-        session.revision_rounds = session.max_revision_rounds
+        session.revision_rounds = session.max_revision_rounds = 2
         draft = DraftRevision(
             draft_id="s-guard-v1",
             version=1,
@@ -103,6 +105,91 @@ class RoundLimitTest(unittest.TestCase):
         self.assertEqual(session.status, SessionStatus.CLARIFYING)
         self.assertEqual(decision.detail["escalated"], "revision_limit")
         self.assertTrue(session.messages[-1].clarification_questions)
+
+
+    def test_incomplete_combined_response_and_unverified_pass_are_rejected(self):
+        session = build_session(self.engine)
+        session.tasks.clear()
+        session.waiting_for = WaitingFor.HOST_DECISION
+        for issue_id in ("blocking-A", "blocking-B"):
+            session.issues[issue_id] = Issue(issue_id, "T1", Role.REVIEWER, "需要验证",
+                                             Severity.BLOCKING, source_seqs=(1,))
+        dispatched = self.engine.name_responses(session, {Role.PRODUCT: tuple(session.issues)})
+        task, = dispatched.tasks
+        first = IssueResponse("blocking-A", "已处理 A", "验证 A 的输出", (1,))
+        output = SpeakerOutput(task.task_id, session.session_id, task.role, task.kind, task.input_version,
+                               task.snapshot_ref, task.round_no, task.topic_id, text="修改两个问题",
+                               issue_ids=("blocking-A",), responses=(first,))
+        self.assertFalse(self.engine.submit_output(session, output).ok)
+        self.assertTrue(all(issue.status.value == "open" for issue in session.issues.values()))
+        second = IssueResponse("blocking-B", "已处理 B", "检查 B 的结果", (1,))
+        accepted = replace(output, issue_ids=("blocking-A", "blocking-B"), responses=(first, second))
+        self.assertTrue(self.engine.submit_output(session, accepted).ok)
+        self.assertTrue(all(issue.status.value == "answered" for issue in session.issues.values()))
+        session.tasks.clear()
+        draft = DraftRevision("d-proof", 1, session.input_version, {})
+        session.drafts.append(draft)
+        session.status = SessionStatus.REVIEWING
+        session.waiting_for = WaitingFor.REVIEW
+        review = ReviewResult("r-proof", session.session_id, draft.draft_id, session.input_version, Verdict.PASS)
+        self.assertFalse(self.engine.submit_review(session, review).ok)
+        findings = tuple(
+            ReviewFinding(issue_id, Severity.BLOCKING, "FR-1", "已核对冻结草稿", "结果可观察",
+                          Role.PRODUCT, issue_id=issue_id, source_seqs=(1,))
+            for issue_id in session.issues
+        )
+        self.assertTrue(self.engine.submit_review(session, replace(review, verified_findings=findings)).ok)
+        self.assertTrue(all(issue.status.value == "closed" for issue in session.issues.values()))
+
+
+    def test_returning_a_passed_draft_creates_a_targeted_user_revision(self):
+        session = build_session(self.engine)
+        session.tasks.clear()
+        session.status = SessionStatus.REVIEWING
+        session.waiting_for = WaitingFor.REVIEW
+        draft = DraftRevision("d-approved", 1, session.input_version, {})
+        session.drafts.append(draft)
+        review = ReviewResult("r-approved", session.session_id, draft.draft_id, session.input_version, Verdict.PASS)
+        self.assertTrue(self.engine.submit_review(session, review).ok)
+        self.assertFalse(self.engine.require_changes(session, "", draft_id=draft.draft_id).ok)
+
+        returned = self.engine.require_changes(session, "增加并发冲突提示", draft_id=draft.draft_id)
+        self.assertTrue(returned.ok)
+        task, = returned.tasks
+        issue_id, = task.issue_ids
+        issue = session.issues[issue_id]
+        self.assertEqual(issue.raised_by, Role.USER)
+        self.assertEqual(issue.summary, "增加并发冲突提示")
+        self.assertEqual(session.messages[-1].item_refs, (draft.draft_id,))
+        self.assertEqual(session.round_kind, RoundKind.REVISION)
+
+    def test_cosmetic_changes_stall_but_new_acceptance_rules_do_not(self):
+        session = build_session(self.engine)
+        finding = ReviewFinding("issue-1", Severity.BLOCKING, "FR-1", "验收含糊", "说明验收条件", Role.PRODUCT)
+        for version in (1, 2, 3):
+            draft = DraftRevision(
+                f"draft-{version}", version, session.input_version,
+                {"product_name": f"项目 {version}", "requirements": [
+                    {"id": "FR-1", "text": "预约会议室", "acceptance_criteria": ["确认成功。"]},
+                ]},
+            )
+            review = ReviewResult(
+                f"review-{version}", session.session_id, draft.draft_id, session.input_version, Verdict.REVISE,
+                findings=(replace(finding, finding_id=f"issue-{version}"),),
+            )
+            session.drafts.append(draft)
+            if version < 3:
+                session.reviews.append(review)
+        self.assertTrue(self.engine._revision_stalled(session, draft, review))
+        draft.content["requirements"][0]["acceptance_criteria"] = ["并发时只能产生一个有效预约。"]
+        self.assertFalse(self.engine._revision_stalled(session, draft, review))
+
+        # A -> B -> A is also a stall, even if the reviewer renumbers findings
+        # and the recorder changes an unrelated specification field.
+        session.drafts[1].content["requirements"][0]["acceptance_criteria"] = ["一次只允许预订一间。"]
+        draft.content["requirements"][0]["acceptance_criteria"] = ["确认成功。"]
+        draft.content["technical_constraints"] = ["使用不同缓存键。"]
+        self.assertTrue(self.engine._revision_stalled(session, draft, review))
 
 
 class ValueDivergenceTest(unittest.TestCase):

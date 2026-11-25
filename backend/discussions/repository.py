@@ -15,6 +15,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from time import time
 from typing import Any, Iterator, Mapping, Sequence
 
 from .codec import dump_message_row, dump_session, encode, load_session
@@ -23,7 +24,7 @@ SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 MSG_COLUMNS = (
     "session_id, seq, role, kind, text, topic_id, task_id, reply_to_seq, "
-    "source_seqs, item_refs, issue_ids, input_version, round_no, created_at"
+    "source_seqs, item_refs, issue_ids, input_version, round_no, created_at, analysis"
 )
 
 
@@ -47,6 +48,14 @@ class VersionConflict(RuntimeError):
 
 class DuplicateProjection(RuntimeError):
     """投影表与引擎序号不一致。"""
+
+
+class IdempotencyRecorded(RuntimeError):
+    """已有相同作用域和幂等键的结果。"""
+
+
+class LeaseLost(RuntimeError):
+    """另一个执行器已接管会话。"""
 
 
 class StorageBusy(RuntimeError):
@@ -107,6 +116,9 @@ class DiscussionRepository:
 
     #: 已发布表结构上新增的列（CREATE TABLE IF NOT EXISTS 不会补列）。
     COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
+        "discussion_sessions": {"deleted_at": "TEXT"},
+        "role_attempts": {"elapsed_seconds": "REAL"},
+        "discussion_messages": {"analysis": "TEXT NOT NULL DEFAULT '{}'"},
         "spec_handoffs": {
             "spec_expected_revision": "INTEGER NOT NULL DEFAULT 0",
             "content_hash": "TEXT",
@@ -118,7 +130,13 @@ class DiscussionRepository:
         sql = SCHEMA_PATH.read_text(encoding="utf-8")
         with self.connect() as conn:
             conn.executescript(sql)
+        with self._write() as conn:
             self._apply_column_additions(conn)
+            conn.execute(
+                "INSERT OR IGNORE INTO spec_handoff_versions"
+                " SELECT session_id, draft_id, review_id, input_version, confirmed_at, content_hash, content_json"
+                " FROM spec_handoffs"
+            )
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (1, utcnow()),
@@ -138,10 +156,12 @@ class DiscussionRepository:
         session: Any,
         *,
         config_snapshot: str | None = None,
+        agent_mode: str = "off",
         idempotency: tuple[str, str, str, int, str] | None = None,
     ) -> dict[str, Any]:
         now = utcnow()
         with self._write() as conn:
+            self._assert_new_idempotency(conn, idempotency)
             conn.execute(
                 """
                 INSERT INTO discussion_sessions
@@ -165,21 +185,55 @@ class DiscussionRepository:
             )
             self._insert_messages(conn, session, after_seq=0, created_at=now)
             self._sync_derived(conn, session, now)
+            self._queue_run(conn, session.session_id, agent_mode)
             if idempotency is not None:
                 scope, key, request_hash, status_code, body = idempotency
                 conn.execute(
                     "INSERT INTO idempotency_keys(scope, key, request_hash, status_code, response_body, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?)"
-                    " ON CONFLICT(scope, key) DO NOTHING",
+                    " VALUES (?, ?, ?, ?, ?, ?)",
                     (scope, key, request_hash, status_code, body, now),
                 )
         return self.load_meta(session.session_id)
+
+    def list_discussions(self, limit: int, before: tuple[str, str] | None = None) -> list[dict[str, Any]]:
+        boundary = "AND (s.updated_at, s.id) < (?, ?)" if before else ""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT s.id, s.project_id, s.status, s.round_no, s.updated_at,"
+                " COALESCE(substr(m.text, 1, 120), '') AS title"
+                " FROM discussion_sessions s"
+                " LEFT JOIN discussion_messages m ON m.session_id = s.id AND m.seq = 1"
+                " WHERE s.deleted_at IS NULL"
+                f" {boundary} ORDER BY s.updated_at DESC, s.id DESC LIMIT ?",
+                (*(before or ()), limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_discussion(self, session_id: str) -> None:
+        """Hide the discussion and revoke its execution lease in the same transaction."""
+        now = utcnow()
+        with self._write() as conn:
+            gone = conn.execute(
+                "UPDATE discussion_sessions SET deleted_at = ?, state_version = state_version + 1"
+                " WHERE id = ? AND deleted_at IS NULL",
+                (now, session_id),
+            )
+            if not gone.rowcount:
+                if conn.execute("SELECT 1 FROM discussion_sessions WHERE id = ?", (session_id,)).fetchone() is None:
+                    raise NotFound(session_id)
+                return
+            conn.execute("DELETE FROM discussion_runs WHERE session_id = ?", (session_id,))
+            conn.execute(
+                "UPDATE role_attempts SET status = 'CANCELLED', finished_at = ?"
+                " WHERE session_id = ? AND status IN ('QUEUED', 'RUNNING')",
+                (now, session_id),
+            )
 
     def load_state(self, session_id: str) -> tuple[Any, dict[str, Any]]:
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT session_state, state_version, status, input_version, round_no, last_seq,"
-                " active_draft_id, codec_version FROM discussion_sessions WHERE id = ?",
+                " active_draft_id, codec_version FROM discussion_sessions WHERE id = ? AND deleted_at IS NULL",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -191,7 +245,7 @@ class DiscussionRepository:
         with self.connect() as conn:
             row = conn.execute(
                 "SELECT state_version, status, input_version, round_no, last_seq,"
-                " active_draft_id, codec_version FROM discussion_sessions WHERE id = ?",
+                " active_draft_id, codec_version FROM discussion_sessions WHERE id = ? AND deleted_at IS NULL",
                 (session_id,),
             ).fetchone()
         if row is None:
@@ -221,17 +275,21 @@ class DiscussionRepository:
         payload: Mapping[str, Any] | None = None,
         idempotency: tuple[str, str, str, int, str] | None = None,
         handoff: Mapping[str, Any] | None = None,
+        agent_mode: str = "off",
+        lease_owner: str | None = None,
     ) -> dict[str, Any]:
         """CAS 更新会话 + 追加投影 + 审计 + 幂等键，单事务完成。"""
         now = utcnow()
         with self._write() as conn:
+            self._check_lease(conn, session.session_id, lease_owner)
+            self._assert_new_idempotency(conn, idempotency)
             cursor = conn.execute(
                 """
                 UPDATE discussion_sessions
                    SET status = ?, input_version = ?, round_no = ?, last_seq = ?,
                        active_draft_id = ?, session_state = ?, codec_version = 1,
                        state_version = state_version + 1, updated_at = ?
-                 WHERE id = ? AND state_version = ?
+                 WHERE id = ? AND state_version = ? AND deleted_at IS NULL
                 """,
                 (
                     session.status.value,
@@ -258,6 +316,8 @@ class DiscussionRepository:
             self._insert_messages(conn, session, after_seq=high_water, created_at=now)
             self._sync_derived(conn, session, now)
 
+            self._queue_run(conn, session.session_id, agent_mode)
+
             if action is not None:
                 conn.execute(
                     "INSERT INTO discussion_events(session_id, action, payload, decision_code, request_id, created_at)"
@@ -275,12 +335,15 @@ class DiscussionRepository:
                 scope, key, request_hash, status_code, body = idempotency
                 conn.execute(
                     "INSERT INTO idempotency_keys(scope, key, request_hash, status_code, response_body, created_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?)"
-                    " ON CONFLICT(scope, key) DO UPDATE SET request_hash = excluded.request_hash,"
-                    " status_code = excluded.status_code, response_body = excluded.response_body",
+                    " VALUES (?, ?, ?, ?, ?, ?)",
                     (scope, key, request_hash, status_code, body, now),
                 )
             if handoff is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO spec_handoff_versions VALUES (?,?,?,?,?,?,?)",
+                    (session.session_id, handoff["draft_id"], handoff["review_id"], handoff["input_version"],
+                     handoff["confirmed_at"], handoff.get("content_hash"), handoff.get("content_json")),
+                )
                 # 签收与状态更新同事务，避免"已签收但会话未推进"的半提交
                 conn.execute(
                     "INSERT INTO spec_handoffs(session_id, draft_id, review_id, input_version,"
@@ -339,7 +402,7 @@ class DiscussionRepository:
         if actual != expected:
             raise DuplicateProjection(f"投影序号不连续：期望 {expected[:5]}…，实际 {actual[:5]}…")
         conn.executemany(
-            f"INSERT INTO discussion_messages({MSG_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT INTO discussion_messages({MSG_COLUMNS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [dump_message_row(m, session.session_id, created_at) for m in pending],
         )
         return len(pending)
@@ -406,7 +469,7 @@ class DiscussionRepository:
         with self.connect() as conn:
             rows = conn.execute(
                 "SELECT seq, role, kind, text, topic_id, task_id, reply_to_seq, source_seqs,"
-                " item_refs, issue_ids, input_version, round_no, created_at"
+                " item_refs, issue_ids, input_version, round_no, created_at, analysis"
                 " FROM discussion_messages WHERE session_id = ? AND seq > ? ORDER BY seq LIMIT ?",
                 (session_id, after_seq, limit + 1),
             ).fetchall()
@@ -429,7 +492,69 @@ class DiscussionRepository:
             "input_version": row["input_version"],
             "round_no": row["round_no"],
             "created_at": row["created_at"],
+            **json.loads(row["analysis"]),
         }
+
+    @staticmethod
+    def _queue_run(conn: sqlite3.Connection, session_id: str, mode: str) -> None:
+        if mode not in {"simulation", "real"}:
+            return
+        conn.execute(
+            "INSERT INTO discussion_runs(session_id, mode) VALUES (?, ?)"
+            " ON CONFLICT(session_id) DO UPDATE SET generation = generation + 1,"
+            " owner = CASE WHEN mode = excluded.mode THEN owner END,"
+            " mode = excluded.mode",
+            (session_id, mode),
+        )
+
+    def pending_runs(self, mode: str, limit: int | None = None) -> list[str]:
+        with self.connect() as conn:
+            return [row[0] for row in conn.execute(
+                "SELECT session_id FROM discussion_runs WHERE mode = ? AND expires_at <= ? ORDER BY expires_at, session_id LIMIT ?",
+                (mode, time(), -1 if limit is None else limit),
+            )]
+
+    def claim_run(self, session_id: str, mode: str, owner: str, ttl: float) -> int | None:
+        with self._write() as conn:
+            now = time()
+            row = conn.execute(
+                "UPDATE discussion_runs SET owner = ?, expires_at = ?"
+                " WHERE session_id = ? AND mode = ? AND expires_at <= ? RETURNING generation",
+                (owner, now + ttl, session_id, mode, now),
+            ).fetchone()
+            if row is None:
+                return None
+            conn.execute(
+                "UPDATE role_attempts SET status = 'FAILED', error = ?, finished_at = ?"
+                " WHERE session_id = ? AND status IN ('QUEUED', 'RUNNING')",
+                (json.dumps({"code": "PROCESS_INTERRUPTED"}), utcnow(), session_id),
+            )
+            return row["generation"]
+
+    def renew_run(self, session_id: str, owner: str, ttl: float) -> None:
+        with self._write() as conn:
+            self._check_lease(conn, session_id, owner)
+            conn.execute("UPDATE discussion_runs SET expires_at = ? WHERE session_id = ?", (time() + ttl, session_id))
+
+    def release_run(self, session_id: str, owner: str, generation: int, *, finished: bool) -> None:
+        with self._write() as conn:
+            if finished:
+                conn.execute(
+                    "DELETE FROM discussion_runs WHERE session_id = ? AND owner = ? AND generation = ?",
+                    (session_id, owner, generation),
+                )
+            conn.execute(
+                "UPDATE discussion_runs SET owner = NULL, expires_at = 0 WHERE session_id = ? AND owner = ?",
+                (session_id, owner),
+            )
+
+    @staticmethod
+    def _check_lease(conn: sqlite3.Connection, session_id: str, owner: str | None) -> None:
+        if owner is not None and not conn.execute(
+            "SELECT 1 FROM discussion_runs WHERE session_id = ? AND owner = ? AND expires_at > ?",
+            (session_id, owner, time()),
+        ).fetchone():
+            raise LeaseLost(session_id)
 
     # ------------------------------------------------------------------ 调用尝试
 
@@ -444,8 +569,10 @@ class DiscussionRepository:
         snapshot_ref: str,
         input_version: int,
         status: str = "QUEUED",
+        lease_owner: str | None = None,
     ) -> None:
         with self._write() as conn:
+            self._check_lease(conn, session_id, lease_owner)
             conn.execute(
                 "INSERT INTO role_attempts(session_id, logical_task_id, attempt_no, role, task_kind,"
                 " snapshot_ref, input_version, status, started_at) VALUES (?,?,?,?,?,?,?,?,?)"
@@ -474,10 +601,13 @@ class DiscussionRepository:
         usage: Mapping[str, Any] | None = None,
         error: Mapping[str, Any] | None = None,
         output: str | None = None,
+        elapsed_seconds: float | None = None,
+        lease_owner: str | None = None,
     ) -> None:
         with self._write() as conn:
+            self._check_lease(conn, session_id, lease_owner)
             conn.execute(
-                "UPDATE role_attempts SET status = ?, usage = ?, error = ?, output = ?, finished_at = ?"
+                "UPDATE role_attempts SET status = ?, usage = ?, error = ?, output = ?, finished_at = ?, elapsed_seconds = ?"
                 " WHERE session_id = ? AND logical_task_id = ? AND attempt_no = ?",
                 (
                     status,
@@ -485,17 +615,27 @@ class DiscussionRepository:
                     json.dumps(dict(error), ensure_ascii=False) if error else None,
                     output,
                     utcnow(),
+                    elapsed_seconds,
                     session_id,
                     logical_task_id,
                     attempt_no,
                 ),
             )
 
+    def latest_attempt(self, session_id: str, logical_task_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT attempt_no, input_version, snapshot_ref, error FROM role_attempts"
+                " WHERE session_id = ? AND logical_task_id = ? ORDER BY attempt_no DESC LIMIT 1",
+                (session_id, logical_task_id),
+            ).fetchone()
+        return {**dict(row), "error": json.loads(row["error"]) if row["error"] else None} if row else None
+
     def list_attempts(self, session_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
                 "SELECT logical_task_id, attempt_no, role, task_kind, snapshot_ref, input_version,"
-                " status, usage, error, output, started_at, finished_at FROM role_attempts"
+                " status, usage, error, output, started_at, finished_at, elapsed_seconds FROM role_attempts"
                 " WHERE session_id = ? ORDER BY logical_task_id, attempt_no",
                 (session_id,),
             ).fetchall()
@@ -513,7 +653,8 @@ class DiscussionRepository:
         with self._write() as conn:
             cursor = conn.execute(
                 "UPDATE role_attempts SET status = 'FAILED', error = ?, finished_at = ?"
-                " WHERE status IN ('QUEUED', 'RUNNING')",
+                " WHERE status IN ('QUEUED', 'RUNNING')"
+                " AND NOT EXISTS (SELECT 1 FROM discussion_runs WHERE discussion_runs.session_id = role_attempts.session_id)",
                 (json.dumps({"code": reason, "message": "进程重启，调用结果不明"}, ensure_ascii=False), utcnow()),
             )
             return cursor.rowcount
@@ -623,6 +764,24 @@ class DiscussionRepository:
             row = conn.execute("SELECT * FROM spec_handoffs WHERE session_id = ?", (session_id,)).fetchone()
         return dict(row) if row else None
 
+    def get_signed_draft(self, session_id: str, draft_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM spec_handoff_versions WHERE session_id = ? AND draft_id = ?",
+                (session_id, draft_id),
+            ).fetchone()
+            if row is None:
+                row = conn.execute("SELECT * FROM spec_handoffs WHERE session_id = ? AND draft_id = ?",
+                                   (session_id, draft_id)).fetchone()
+        return dict(row) if row else None
+
+    def signed_draft_ids(self, session_id: str) -> set[str]:
+        with self.connect() as conn:
+            return {row[0] for row in conn.execute(
+                "SELECT draft_id FROM spec_handoff_versions WHERE session_id = ?"
+                " UNION SELECT draft_id FROM spec_handoffs WHERE session_id = ?", (session_id, session_id),
+            )}
+
     def mark_handoff_delivered(self, session_id: str, spec_revision_id: str) -> None:
         with self._write() as conn:
             conn.execute(
@@ -666,6 +825,13 @@ class DiscussionRepository:
         }
 
     # ------------------------------------------------------------------ 幂等
+
+    @staticmethod
+    def _assert_new_idempotency(conn: sqlite3.Connection, record: tuple | None) -> None:
+        if record is not None and conn.execute(
+            "SELECT 1 FROM idempotency_keys WHERE scope = ? AND key = ?", record[:2],
+        ).fetchone():
+            raise IdempotencyRecorded
 
     def get_idempotent(self, scope: str, key: str) -> dict[str, Any] | None:
         with self.connect() as conn:

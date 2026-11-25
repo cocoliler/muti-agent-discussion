@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { discussionPath } from './discussions';
+import { api, discussionPath } from './discussions';
 import type { Draft, Handoff, Requirement, Session } from './discussions';
 
 const verdictLabels: Record<string, string> = { pass: '通过', revise: '退回修订', needs_input: '需要补充' };
@@ -8,9 +8,10 @@ function requirements(draft?: Draft | null): Requirement[] {
   return Array.isArray(draft?.content.requirements) ? draft.content.requirements : [];
 }
 
-export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, busy, confirm, requestChanges }: {
+export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate, itemRef, busy, confirm, requestChanges }: {
   session: Session | null;
-  snapshots: Record<string, Draft>;
+  collapsed: boolean;
+  onCollapse: () => void;
   handoff: Handoff | null;
   locate: (seq: number) => void;
   itemRef: { value: string } | null;
@@ -19,6 +20,9 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
   requestChanges?: (reason: string) => void;
 }) {
   const [selection, select] = useState<string | null>(null);
+  const [history, setHistory] = useState<Record<string, Draft>>({});
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyRetry, retryHistory] = useState(0);
   const [comparison, setComparison] = useState(false);
   const [highlighted, setHighlighted] = useState<string | null>(null);
   const [view, setView] = useState<'draft' | 'reviews'>('draft');
@@ -29,17 +33,40 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
   const drafts = session?.drafts ?? [];
   const active = session?.active_draft;
   const selected = drafts.find((draft) => draft.draft_id === selection) ?? active ?? drafts.at(-1);
-  const draft = active?.draft_id === selected?.draft_id ? active : selected && snapshots[selected.draft_id];
-  const prior = selected && drafts.filter((item) => item.version < selected.version && snapshots[item.draft_id]).at(-1);
-  const oldItems = requirements(prior && snapshots[prior.draft_id]);
+  const draft = active?.draft_id === selected?.draft_id ? active : selected && history[selected.draft_id];
+  const prior = selected && (draft?.parent_id
+    ? drafts.find((item) => item.draft_id === draft.parent_id)
+    : drafts.filter((item) => item.version < selected.version).at(-1));
+  const priorDraft = prior && (active?.draft_id === prior.draft_id ? active : history[prior.draft_id]);
+  const oldItems = requirements(priorDraft);
   const items = requirements(draft);
   const reviews = session?.reviews.filter((review) => review.draft_id === selected?.draft_id) ?? [];
   const current = !!selected && selected.draft_id === active?.draft_id;
   const receipt = handoff?.draft_id === selected?.draft_id ? handoff : null;
-  const exportUrl = current && session?.status === 'completed' ? session.export_url ?? receipt?.export_url : null;
+  const signed = !!drafts.find((item) => item.draft_id === selected?.draft_id)?.signed
+    || (current && session?.status === 'completed');
+  const exportUrl = signed && session?.export_url
+    ? `/api/v1${discussionPath(session.id)}/export?draft_id=${encodeURIComponent(selected!.draft_id)}`
+    : receipt?.export_url;
   const verdict = reviews.at(-1)?.verdict ?? draft?.review_verdict;
-  const comparing = comparison && !!prior && !!draft;
-  const scorecard = session?.scorecard ?? null;
+  const canUseReviewReasons = verdict === 'revise';
+  const comparing = comparison && !!priorDraft && !!draft;
+  const scorecard = draft?.scorecard;
+  const draftToLoad = !draft ? selected?.draft_id : comparison && !priorDraft ? prior?.draft_id : undefined;
+  const sessionId = session?.id;
+
+  useEffect(() => {
+    if (!sessionId || !draftToLoad) return;
+    const controller = new AbortController();
+    setHistoryError(null);
+    void api<Draft>(`${discussionPath(sessionId)}/drafts/${encodeURIComponent(draftToLoad)}`,
+      undefined, undefined, controller.signal).then((result) => {
+        if (!controller.signal.aborted) setHistory((current) => ({ ...current, [result.draft_id]: result }));
+      }).catch(() => {
+        if (!controller.signal.aborted) setHistoryError(draftToLoad);
+      });
+    return () => controller.abort();
+  }, [sessionId, draftToLoad, historyRetry]);
 
   useEffect(() => {
     setEditingReason(false);
@@ -100,9 +127,13 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
     }
   }
 
-  return <aside className="spec" aria-label="共识规格">
+  return <aside id="live-spec-panel" className="spec" aria-label="共识规格" hidden={collapsed}>
     <header className="pane-title"><div><h2 id="live-spec-title" tabIndex={-1}>共识规格</h2><p>需求、评审与签收</p></div>
-      {selected && <span className="count">v{selected.version}</span>}
+      <div className="pane-actions">
+        {selected && <span className="count">v{selected.version}</span>}
+        <button type="button" className="spec-toggle" aria-controls="live-spec-panel" aria-expanded
+          onClick={onCollapse}>收起</button>
+      </div>
     </header>
     {!selected ? <div className="spec-empty"><span aria-hidden="true">▤</span><h3>还没有规格草稿</h3><p>共识形成后，需求和验收条件会显示在这里。</p></div> : <>
     <div className="spec-navigation">
@@ -111,11 +142,11 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
         <button aria-pressed={view === 'reviews'} onClick={() => setView('reviews')}>评审记录 <span>{reviews.length}</span></button>
       </div>
       <div className="versions">{drafts.map((item) => <button key={item.draft_id} aria-pressed={selected.draft_id === item.draft_id}
-        onClick={() => { select(item.current ? null : item.draft_id); setComparison(false); setHighlighted(null); }}>v{item.version}{item.current ? ' 当前' : ''}</button>)}</div>
+        onClick={() => { select(item.current ? null : item.draft_id); setComparison(false); setHighlighted(null); }}>v{item.version}{item.current ? ' 当前' : item.signed ? ' 已签收' : ''}</button>)}</div>
     </div>
     <div className="spec-content">
       <div className="spec-meta"><span>输入 v{selected.input_version} · {selected.open_issue_ids.length} 个待处理问题</span>
-        {session?.status === 'completed' && current ? <span className="verdict pass">已签收</span>
+        {signed ? <span className="verdict pass">{verdict === 'revise' ? '已签收 · 建议修订' : '已签收'}</span>
           : verdict && <span className={`verdict ${verdict}`}>{verdictLabels[verdict] ?? verdict}</span>}
       </div>
       {(receipt || exportUrl) && <div className="handoff">
@@ -124,7 +155,10 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
       </div>}
       {view === 'draft' && <>
       {draft?.content.product_name && <h3 className="spec-product">{draft.content.product_name}</h3>}
-      {!draft && <p className="draft-context">本次会话未加载此版本的正文，可切换到评审记录查看结论。</p>}
+      {draftToLoad && (historyError === draftToLoad
+        ? <p className="draft-context" role="alert">暂时无法读取历史版本。 <button type="button"
+            onClick={() => retryHistory((attempt) => attempt + 1)}>重试</button></p>
+        : <p className="draft-context" role="status">正在读取{draft ? '对比版本' : '历史规格'}…</p>)}
       {draft && prior && <button className="compare" aria-expanded={comparison} onClick={() => setComparison(!comparison)}>
         {comparison ? '收起版本差异' : `比较 v${prior.version} 与 v${draft.version}`}</button>}
       {items.map((item) => {
@@ -157,6 +191,20 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
           {option.option_id === scorecard.chosen_option_id && <span className="tag">已采纳</span>}
         </li>)}</ol>
         {scorecard.rationale && <p className="scorecard-note">{scorecard.rationale}</p>}
+        {scorecard.stances && Object.keys(scorecard.stances).length > 0 && <details className="draft-context">
+          <summary>查看各角色立场</summary>
+          {Object.entries(scorecard.stances).map(([role, stances]) => <div key={role}>
+            <strong>{{ product: '产品经理', research: '用户研究员', architect: '技术架构师',
+              designer: '交互设计师', business: '商业分析' }[role] ?? role}</strong>
+            <ul>{stances.map((stance) => <li key={stance.option_id}>
+              {stance.option_id} · {{ support: '赞同', oppose: '反对', conditional: '有条件赞同' }[stance.position] ?? stance.position}
+              {' · '}{stance.reason}
+              {stance.source_seqs.length > 0 && <div className="references">
+                {stance.source_seqs.map((seq) => <button key={seq} onClick={() => locate(seq)}>#{seq}</button>)}
+              </div>}
+            </li>)}</ul>
+          </div>)}
+        </details>}
       </section>}
       {draft && ((draft.disagreements?.length ?? 0) > 0 || (draft.alternatives?.length ?? 0) > 0) &&
         <section className="divergence">
@@ -169,6 +217,15 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
             <ul>{draft.alternatives!.map((item, index) => <li key={index}>{item}</li>)}</ul>
           </>}
         </section>}
+      {draft && [draft.agreements, draft.assumptions, draft.risks].some((items) => items?.length) &&
+        <details className="draft-context">
+          <summary>共识、假设与风险</summary>
+          {([['共识', draft.agreements], ['待验证假设', draft.assumptions], ['风险', draft.risks]] as const)
+            .filter(([, items]) => items?.length).map(([title, items]) => <div key={title}>
+              <p className="section-label">{title}</p>
+              <ul>{items!.map((item, index) => <li key={index}>{item}</li>)}</ul>
+            </div>)}
+        </details>}
       {draft && <div className="spec-export">
         <button type="button" onClick={() => void exportDraft()} disabled={exporting || busy}>
           {exporting ? '正在导出…' : '导出 JSON'}
@@ -190,13 +247,18 @@ export function DiscussionSpec({ session, snapshots, handoff, locate, itemRef, b
       </section>))}
     </div>
     {current && (confirm || requestChanges) && <footer className="spec-actions">
-      {editingReason && requestChanges && <form className="live-form" onSubmit={(event) => { event.preventDefault(); if (reason.trim()) requestChanges(reason.trim()); }}>
-        <label>修订原因<textarea autoFocus required rows={2} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
-        <button disabled={busy || !reason.trim()}>提交修订要求</button>
+      {canUseReviewReasons && <p>{signed
+        ? '可按本版评审意见继续修订，已签收版本会保留。'
+        : '可直接签收并保留评审意见，也可退回后按评审意见修订。'}</p>}
+      {editingReason && requestChanges && <form className="live-form" onSubmit={(event) => { event.preventDefault(); if (canUseReviewReasons || reason.trim()) requestChanges(reason.trim()); }}>
+        <label>{canUseReviewReasons ? '补充修订意见（可选）' : '修订原因'}<textarea autoFocus required={!canUseReviewReasons} rows={2} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+        <button disabled={busy || (!canUseReviewReasons && !reason.trim())}>确认退回 v{selected.version}</button>
       </form>}
       <div className="action-row">
-        {confirm && <button className="primary" disabled={busy} onClick={confirm}>签收 v{selected.version}</button>}
-        {requestChanges && <button onClick={() => setEditingReason(!editingReason)} aria-expanded={editingReason}>{editingReason ? '收起修订说明' : '要求修订'}</button>}
+        {confirm && <button className="primary" disabled={busy} onClick={confirm}>
+          {canUseReviewReasons ? '直接签收' : '签收'} v{selected.version}
+        </button>}
+        {requestChanges && <button onClick={() => setEditingReason(!editingReason)} aria-expanded={editingReason}>{editingReason ? '收起修订说明' : '退回修订'}</button>}
       </div>
     </footer>}
     </>}

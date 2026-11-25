@@ -1,7 +1,6 @@
 """签收门禁与 `SpecHandoff` 记录。
 
-设计文档 3.2 规定签收必须同时满足：草稿仍是当前版本、同版本评审通过、没有开放阻断项、
-结构校验通过。未通过评审或仍有阻断项时不得签收，也不得导出可导入正文。
+签收要求当前草稿、同版本评审和可交接的规格正文。用户可签收建议修订的版本，保留原评审意见。
 
 本模块只读讨论会话（`DiscussionSession`），不改状态：把「能不能签收」变成可测试的结论，
 会话阶段迁移仍由 `DiscussionEngine.confirm` 负责。
@@ -45,6 +44,7 @@ class SpecHandoff:
     content_hash: str
     confirmed_at: str
     open_findings: tuple[Finding, ...] = ()
+    review_verdict: str = Verdict.PASS.value
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -53,6 +53,7 @@ class SpecHandoff:
             "draft_id": self.draft_id,
             "draft_version": self.draft_version,
             "review_id": self.review_id,
+            "review_verdict": self.review_verdict,
             "input_version": self.input_version,
             "content_hash": self.content_hash,
             "confirmed_at": self.confirmed_at,
@@ -122,15 +123,16 @@ def sign_off(
         return SignOffResult(ok=False, findings=tuple(findings))
 
     review = session.review_of(draft.draft_id)
-    if review is None or review.verdict is not Verdict.PASS or draft.review_id != review.review_id:
+    if (review is None or review.verdict not in (Verdict.PASS, Verdict.REVISE)
+            or draft.review_id != review.review_id or review.input_version != input_version):
         findings.append(
             Finding(
                 Code.REVIEW_NOT_PASSED,
                 "/review_id",
-                "当前草稿没有同版本的通过评审",
+                "当前草稿没有同版本的签收评审",
             )
         )
-    else:
+    elif review.verdict is Verdict.PASS:
         blocking_findings = [
             item for item in review.findings if item.severity is ReviewSeverity.BLOCKING
         ]
@@ -173,6 +175,7 @@ def sign_off(
         content_hash=content_hash(report.content),
         confirmed_at=now or _now(),
         open_findings=report.warnings,
+        review_verdict=review.verdict.value,
     )
     return SignOffResult(ok=True, findings=(), report=report, handoff=handoff)
 

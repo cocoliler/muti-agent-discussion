@@ -20,11 +20,11 @@ from discussion_orchestration.scoring import rank_options
 
 from .codec import CodecError, decode, encode
 from .errors import ApiError, decision_error_code, decision_status
-from .repository import DiscussionRepository, NotFound, VersionConflict, utcnow
+from .repository import IdempotencyRecorded, DiscussionRepository, NotFound, VersionConflict, utcnow
 
 
-def _configured_limit(name: str, default: int) -> int:
-    """轮次硬上限可由环境变量覆盖（默认 2），非法值回落到默认。"""
+def _configured_limit(name: str, default: int | None) -> int | None:
+    """轮次硬上限可由环境变量覆盖，非法值回落到默认。"""
 
     try:
         value = int(os.getenv(name, ""))
@@ -90,21 +90,54 @@ class DiscussionService:
             idea=idea,
         )
         session.max_directed_rounds = _configured_limit(
-            "DISCUSSION_MAX_DIRECTED_ROUNDS", getattr(session, "max_directed_rounds", 2)
+            "DISCUSSION_MAX_DIRECTED_ROUNDS", getattr(session, "max_directed_rounds", None)
         )
         session.max_revision_rounds = _configured_limit(
-            "DISCUSSION_MAX_REVISION_ROUNDS", getattr(session, "max_revision_rounds", 2)
+            "DISCUSSION_MAX_REVISION_ROUNDS", getattr(session, "max_revision_rounds", None)
         )
         body = self._render(session, {"state_version": 1})
-        self.repo.create_session(
-            session,
-            idempotency=(
-                (scope, idempotency_key, request_hash, 201, json.dumps(body, ensure_ascii=False))
-                if idempotency_key
-                else None
-            ),
-        )
+        try:
+            self.repo.create_session(
+                session,
+                agent_mode=self.agent_mode,
+                idempotency=(
+                    (scope, idempotency_key, request_hash, 201, json.dumps(body, ensure_ascii=False))
+                    if idempotency_key
+                    else None
+                ),
+            )
+        except IdempotencyRecorded:
+            replayed = self._replay(scope, idempotency_key, request_hash)
+            if replayed is not None:
+                return replayed
+            raise
         return 201, body
+
+    def delete(self, session_id: str) -> None:
+        try:
+            self.repo.delete_discussion(session_id)
+        except NotFound as exc:
+            raise ApiError("NOT_FOUND", "找不到讨论会话", status=404) from exc
+
+    def discussions(self, limit: int, before: tuple[str, str] | None) -> dict[str, Any]:
+        rows = self.repo.list_discussions(limit + 1, before)
+        page = rows[:limit]
+        cursor = f"{page[-1]['updated_at']}|{page[-1]['id']}" if len(rows) > limit else None
+        for row in page:
+            row["title"] = " ".join(row["title"].split()) or "未命名讨论"
+        return {"items": page, "next_cursor": cursor}
+
+    def draft(self, session_id: str, draft_id: str) -> dict[str, Any]:
+        session, _ = self._load(session_id)
+        draft = self._find_draft(session, draft_id)
+        return self._draft_view(session, draft)
+
+    @staticmethod
+    def _find_draft(session: Any, draft_id: str) -> Any:
+        draft = next((item for item in getattr(session, "drafts", ()) if item.draft_id == draft_id), None)
+        if draft is None:
+            raise ApiError("NOT_FOUND", f"找不到草稿版本 {draft_id}", status=404)
+        return draft
 
     def view(self, session_id: str) -> dict[str, Any]:
         session, meta = self._load(session_id)
@@ -127,9 +160,13 @@ class DiscussionService:
         return self.repo.history(session_id)
 
     def export_content(self, session_id: str, draft_id: str | None = None) -> dict[str, Any]:
+        self._meta(session_id)
         if draft_id is not None:
-            return self._export_draft(session_id, draft_id)
-        handoff = self.repo.get_handoff(session_id)
+            handoff = self.repo.get_signed_draft(session_id, draft_id)
+            if not handoff or not handoff["content_json"]:
+                return self._export_draft(session_id, draft_id)
+        else:
+            handoff = self.repo.get_handoff(session_id)
         if not handoff:
             raise ApiError("VALIDATION_FAILED", "尚未签收，无法导出", status=409)
         raw = handoff.get("content_json")
@@ -157,12 +194,7 @@ class DiscussionService:
         from spec_handoff import DraftSpec
 
         session, _ = self._load(session_id)
-        draft = next(
-            (item for item in getattr(session, "drafts", ()) if item.draft_id == draft_id),
-            None,
-        )
-        if draft is None:
-            raise ApiError("NOT_FOUND", f"找不到草稿版本 {draft_id}", status=404)
+        draft = self._find_draft(session, draft_id)
         return {
             "content": DraftSpec.parse(draft.content).to_content(),
             "draft_id": draft.draft_id,
@@ -195,7 +227,12 @@ class DiscussionService:
                 return replayed
 
         session, meta = self._load(session_id)
-        self._check_version(session_id, expected_state_version, meta)
+        replayed = self._check_version(
+            session_id, expected_state_version, meta,
+            replay=(scope, idempotency_key, request_hash) if idempotency_key else None,
+        )
+        if replayed is not None:
+            return replayed
         # §6：接收上下文版本；旧版本补充不得推进当前会话
         if input_version is not None and input_version != session.input_version:
             raise ApiError(
@@ -237,6 +274,7 @@ class DiscussionService:
         request_hash: str,
         scope: str,
         request_id: str = "",
+        lease_owner: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         if idempotency_key:
             replayed = self._replay(scope, idempotency_key, request_hash)
@@ -244,13 +282,19 @@ class DiscussionService:
                 return replayed
 
         session, meta = self._load(session_id)
-        self._check_version(session_id, expected_state_version, meta)
+        replayed = self._check_version(
+            session_id, expected_state_version, meta,
+            replay=(scope, idempotency_key, request_hash) if idempotency_key else None,
+        )
+        if replayed is not None:
+            return replayed
         decision = self._dispatch(session, action, dict(payload))
         return self._commit(
             session,
             meta,
             decision,
             action=action,
+            lease_owner=lease_owner,
             payload=payload,
             request_id=request_id,
             idempotency=(scope, idempotency_key, request_hash) if idempotency_key else None,
@@ -275,7 +319,12 @@ class DiscussionService:
                 return replayed
 
         session, meta = self._load(session_id)
-        self._check_version(session_id, expected_state_version, meta)
+        replayed = self._check_version(
+            session_id, expected_state_version, meta,
+            replay=(scope, idempotency_key, request_hash) if idempotency_key else None,
+        )
+        if replayed is not None:
+            return replayed
 
         # 签收门禁以 spec_handoff.sign_off 为权威（纯读，不改状态）。
         # 先判门禁再调引擎：否则引擎已推进、交接却说不可签收，就成了半提交。
@@ -311,6 +360,7 @@ class DiscussionService:
                 "status": "confirmed",
                 "draft_id": draft_id,
                 "review_id": record.review_id,
+                "review_verdict": getattr(record, "review_verdict", "pass"),
                 "input_version": input_version,
                 "spec_expected_revision": spec_expected_revision,
                 "content_hash": content_hash,
@@ -321,10 +371,10 @@ class DiscussionService:
                     f"/api/v1/discussions/{session_id}/export" if self.export_enabled else None
                 ),
             },
-            "session": self._render(session, {**meta, "state_version": meta["state_version"] + 1}),
+            "session": self._render(session, {**meta, "state_version": meta["state_version"] + 1, "signed_draft_id": draft_id}),
         }
         # 状态推进、签收记录、幂等键三者同事务
-        self.repo.save_after_decision(
+        replayed = self._save_with_replay(
             session,
             expected_state_version,
             action="confirm",
@@ -338,7 +388,7 @@ class DiscussionService:
             ),
             handoff=handoff,
         )
-        return 200, body
+        return replayed if replayed is not None else (200, body)
 
     # ------------------------------------------------------------------ 内部
 
@@ -354,15 +404,20 @@ class DiscussionService:
         except NotFound as exc:
             raise ApiError("NOT_FOUND", f"找不到讨论会话 {session_id}", status=404) from exc
 
-    @staticmethod
-    def _check_version(session_id: str, expected: int, meta: Mapping[str, Any]) -> None:
+    def _check_version(
+        self, session_id: str, expected: int, meta: Mapping[str, Any],
+        *, replay: tuple[str, str, str] | None = None,
+    ) -> tuple[int, dict[str, Any]] | None:
         if meta["state_version"] != expected:
+            if replay is not None and (recorded := self._replay(*replay)) is not None:
+                return recorded
             raise ApiError(
                 "REVISION_CONFLICT",
                 "会话已被其他写入更新，请刷新后重试",
                 status=409,
                 detail={"state_version": meta["state_version"], "expected_state_version": expected},
             )
+        return None
 
     def _assert_local_reference(self, session_id: str, seqs: list[int], meta: Mapping[str, Any]) -> None:
         """引用必须指向本会话已提交消息（跨会话引用在此处被拒）。"""
@@ -391,7 +446,7 @@ class DiscussionService:
             "pause": lambda: engine.pause(session, payload.get("reason", "")),
             "resume": lambda: engine.resume(session),
             "cancel": lambda: engine.cancel(session, payload.get("reason", "")),
-            "require_changes": lambda: engine.require_changes(session, payload.get("reason", "")),
+            "require_changes": lambda: engine.require_changes(session, payload.get("reason", ""), draft_id=payload.get("draft_id")),
             "abandon_task": lambda: engine.abandon_task(
                 session, payload.get("task_id", ""), payload.get("reason", "")
             ),
@@ -427,23 +482,29 @@ class DiscussionService:
         payload: Mapping[str, Any],
         request_id: str,
         idempotency: tuple[str, str, str] | None,
+        lease_owner: str | None = None,
     ) -> tuple[int, dict[str, Any]]:
         if not decision.ok:
             return self._reject(decision)
 
-        previous_last_seq = meta["last_seq"]
-        new_messages = [m for m in getattr(session, "messages", ()) if m.seq > previous_last_seq]
-        body = {
-            "decision": self._decision_view(decision),
-            "session": self._render(session, {**meta, "state_version": meta["state_version"] + 1}),
-            "new_messages": [self._message_view(m) for m in new_messages],
-            "tasks": [self._task_view(t) for t in getattr(decision, "tasks", ())],
-        }
+        body = {"decision": self._decision_view(decision)}
+        if lease_owner is None:
+            previous_last_seq = meta["last_seq"]
+            new_messages = [m for m in getattr(session, "messages", ()) if m.seq > previous_last_seq]
+            body.update(
+                session=self._render(session, {**meta, "state_version": meta["state_version"] + 1}),
+                new_messages=[self._message_view(message) for message in new_messages],
+                tasks=[self._task_view(task) for task in getattr(decision, "tasks", ())],
+            )
         key_tuple = None
         if idempotency is not None:
             scope, key, request_hash = idempotency
             key_tuple = (scope, key, request_hash, 200, json.dumps(body, ensure_ascii=False))
-        self.repo.save_after_decision(
+        schedule = lease_owner is None and (
+            action in {"run_agents", "submit_agenda", "submit_output", "submit_review", "propose", "require_changes", "resume"}
+            or (action == "post_message" and payload["substantive"])
+        )
+        replayed = self._save_with_replay(
             session,
             meta["state_version"],
             action=action,
@@ -451,8 +512,22 @@ class DiscussionService:
             request_id=request_id,
             payload=payload,
             idempotency=key_tuple,
+            agent_mode=self.agent_mode if schedule else "off",
+            lease_owner=lease_owner,
         )
-        return 200, body
+        return replayed if replayed is not None else (200, body)
+
+    def _save_with_replay(self, session, version: int, *, idempotency, **fields):
+        try:
+            self.repo.save_after_decision(session, version, idempotency=idempotency, **fields)
+        except IdempotencyRecorded:
+            if idempotency is not None:
+                scope, key, request_hash, _, _ = idempotency
+                replayed = self._replay(scope, key, request_hash)
+                if replayed is not None:
+                    return replayed
+            raise
+        return None
 
     def _reject(self, decision: Any) -> tuple[int, dict[str, Any]]:
         code = self._code(decision)
@@ -568,15 +643,34 @@ class DiscussionService:
                 picks[question] = entries[:4]
         return {"message_seq": message.seq, "questions": questions, "options": picks}
 
-    def _render(self, session: Any, meta: Mapping[str, Any]) -> dict[str, Any]:
-        draft = getattr(session, "current_draft", None)
-        review_verdict = None
-        if draft is not None:
-            for item in reversed(getattr(session, "reviews", ())):
-                if item.draft_id == draft.draft_id:
-                    review_verdict = getattr(item.verdict, "value", item.verdict)
-                    break
+    @staticmethod
+    def _usage(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+        by_task: dict[str, dict[str, Any]] = {}
+        for attempt in attempts:
+            usage = attempt["usage"] or {}
+            elapsed = attempt.get("elapsed_seconds")
+            code = (attempt["error"] or {}).get("code")
+            if elapsed is None and not usage:
+                continue  # Old or interrupted records can have an unknown provider outcome.
+            summary = by_task.setdefault(attempt["task_kind"], {
+                "calls": 0, "tokens": 0, "elapsed_seconds": 0.0, "retries": 0, "invalid_outputs": 0,
+            })
+            summary["calls"] += 1
+            summary["tokens"] += usage.get("total_tokens") or 0
+            summary["elapsed_seconds"] += elapsed or 0
+            summary["retries"] += int(attempt["attempt_no"] > 1)
+            summary["invalid_outputs"] += int(code == "invalid_output")
+        total = {key: sum(bucket[key] for bucket in by_task.values()) for key in (
+            "calls", "tokens", "elapsed_seconds", "retries", "invalid_outputs",
+        )}
+        return {**total, "by_task": by_task}
 
+    def _render(self, session: Any, meta: Mapping[str, Any]) -> dict[str, Any]:
+        attempts = self.repo.list_attempts(session.session_id)
+        signed_drafts = self.repo.signed_draft_ids(session.session_id)
+        if signed_draft := meta.get("signed_draft_id"):
+            signed_drafts.add(signed_draft)
+        draft = getattr(session, "current_draft", None)
         return {
             "id": session.session_id,
             "project_id": session.project_id,
@@ -594,26 +688,11 @@ class DiscussionService:
                                       for message in session.messages if getattr(message, "clarification_answers", ())},
             "superseded_answer_seqs": [message.replaces_answer_seq for message in session.messages
                                        if getattr(message, "replaces_answer_seq", None) is not None],
-            "participants": self._participants(session),
+            "participants": self._participants(session, attempts),
+            "usage": self._usage(attempts),
             "pending_tasks": [self._task_view(task) for task in getattr(session, "tasks", {}).values()],
             "agent_mode": self.agent_mode,
-            "active_draft": (
-                {
-                    "draft_id": draft.draft_id,
-                    "version": draft.version,
-                    "input_version": draft.input_version,
-                    "open_issue_ids": list(draft.open_issue_ids),
-                    "review_verdict": review_verdict,
-                    "content": dict(draft.content),
-                    "agreements": list(getattr(draft, "agreements", ()) or ()),
-                    "alternatives": list(getattr(draft, "alternatives", ()) or ()),
-                    "disagreements": list(getattr(draft, "disagreements", ()) or ()),
-                    "scorecard_id": getattr(draft, "scorecard_id", None),
-                    "chosen_option_id": getattr(draft, "chosen_option_id", None),
-                }
-                if draft is not None
-                else None
-            ),
+            "active_draft": self._draft_view(session, draft) if draft else None,
             "scorecard": self._scorecard_view(session),
             # §6 要求返回"草稿、评审"：历史以版本摘要呈现，正文在 active_draft
             "drafts": [
@@ -622,6 +701,7 @@ class DiscussionService:
                     "version": item.version,
                     "input_version": item.input_version,
                     "current": item.draft_id == getattr(draft, "draft_id", None),
+                    "signed": item.draft_id in signed_drafts,
                     "open_issue_ids": list(item.open_issue_ids),
                 }
                 for item in getattr(session, "drafts", ()) or ()
@@ -633,23 +713,42 @@ class DiscussionService:
                     "input_version": item.input_version,
                     "verdict": getattr(item.verdict, "value", item.verdict),
                     "findings": [encode(finding) for finding in getattr(item, "findings", ()) or ()],
+                    "verified_findings": [encode(finding) for finding in getattr(item, "verified_findings", ()) or ()],
                 }
                 for item in getattr(session, "reviews", ()) or ()
             ],
             "open_issues": [encode(issue) for issue in session.open_issues()],
         }
 
-    def _scorecard_view(self, session: Any) -> dict[str, Any] | None:
-        """最新一份当前输入版本的评分卡，附带确定性排名。"""
+    def _draft_view(self, session: Any, draft: Any) -> dict[str, Any]:
+        review = next((item for item in reversed(getattr(session, "reviews", ()))
+                       if item.draft_id == draft.draft_id), None)
+        scorecard_id = getattr(draft, "scorecard_id", None)
+        return {
+            "draft_id": draft.draft_id,
+            "version": draft.version,
+            "input_version": draft.input_version,
+            "parent_id": getattr(draft, "parent_id", None),
+            "open_issue_ids": list(draft.open_issue_ids),
+            "review_verdict": getattr(review.verdict, "value", review.verdict) if review else None,
+            "content": dict(draft.content),
+            "agreements": list(getattr(draft, "agreements", ()) or ()),
+            "alternatives": list(getattr(draft, "alternatives", ()) or ()),
+            "disagreements": list(getattr(draft, "disagreements", ()) or ()),
+            "assumptions": list(getattr(draft, "assumptions", ()) or ()),
+            "risks": list(getattr(draft, "risks", ()) or ()),
+            "scorecard_id": scorecard_id,
+            "chosen_option_id": getattr(draft, "chosen_option_id", None),
+            "scorecard": self._scorecard_view(session, scorecard_id) if scorecard_id else None,
+        }
 
-        cards = [
-            card
-            for card in getattr(session, "scorecards", ()) or ()
-            if card.input_version == session.input_version
-        ]
-        if not cards:
+    def _scorecard_view(self, session: Any, scorecard_id: str | None = None) -> dict[str, Any] | None:
+        card = next((
+            card for card in reversed(getattr(session, "scorecards", ()) or ())
+            if (card.scorecard_id == scorecard_id if scorecard_id else card.input_version == session.input_version)
+        ), None)
+        if card is None:
             return None
-        card = cards[-1]
         ranked = rank_options(card.options, card.weights)
         return {
             "scorecard_id": card.scorecard_id,
@@ -657,6 +756,7 @@ class DiscussionService:
             "input_version": card.input_version,
             "chosen_option_id": card.chosen_option_id,
             "rationale": card.rationale,
+            "stances": {role.value: [encode(stance) for stance in positions] for role, positions in card.stances.items()},
             "weights": {dimension.value: weight for dimension, weight in card.weights.items()},
             "options": [
                 {
@@ -670,14 +770,14 @@ class DiscussionService:
             ],
         }
 
-    def _participants(self, session: Any) -> list[dict[str, Any]]:
+    def _participants(self, session: Any, attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """参与者状态：调用尝试 > 本轮已发言 > 已派发待执行。"""
         latest: dict[str, dict[str, Any]] = {}
         pending_tasks = getattr(session, "tasks", {})
         current_ids = set(pending_tasks) | {m.task_id for m in session.messages if m.round_no == session.round_no}
         if session.current_draft:
             current_ids.add(f"{session.current_draft.draft_id}:agent:review")
-        for attempt in self.repo.list_attempts(session.session_id):
+        for attempt in attempts:
             if attempt["input_version"] != session.input_version:
                 continue
             if attempt["logical_task_id"] not in current_ids and attempt["task_kind"] != "agenda":

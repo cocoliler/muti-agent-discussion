@@ -31,14 +31,14 @@ class SignOffGateTest(unittest.TestCase):
         self.assertEqual(handoff.content_hash, content_hash(handoff.content))
         self.assertIn("FR-02", handoff.content["requirements"][1]["id"])
 
-    def test_revise_verdict_blocks_sign_off(self) -> None:
+    def test_revise_verdict_can_be_signed_while_preserving_review_outcome(self) -> None:
         session = make_session(verdict=Verdict.REVISE, findings=(blocking_finding(),))
-
+        session.current_draft.review_id = "rv-1"
         result = sign_off(session, draft_id="s-1-v1", input_version=1)
-
-        self.assertFalse(result.ok)
-        self.assertIsNone(result.handoff)
-        self.assertIn(Code.REVIEW_NOT_PASSED.value, _codes(result))
+        self.assertTrue(result.ok, result.findings)
+        self.assertEqual(result.handoff.review_verdict, "revise")
+        self.assertEqual(result.handoff.review_id, "rv-1")
+        self.assertEqual(session.review_of("s-1-v1").verdict, Verdict.REVISE)
 
     def test_blocking_finding_inside_pass_review_blocks(self) -> None:
         session = make_session(findings=(blocking_finding(),))

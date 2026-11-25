@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from typing import Mapping
 
@@ -38,6 +39,7 @@ from .models import (
     DraftRevision,
     HostProposal,
     Issue,
+    IssueResponse,
     Message,
     Rejection,
     ReviewResult,
@@ -115,7 +117,8 @@ class DiscussionEngine:
                 return self._reject(session, ReasonCode.ILLEGAL_REPLY_TARGET, "回答需关联原澄清问题")
             if replaces_answer_seq is not None:
                 previous = next((item for item in reversed(session.messages)
-                                 if item.kind == MessageKind.USER_INPUT and item.reply_to_seq == prompt.seq), None)
+                                 if item.kind == MessageKind.USER_INPUT and item.substantive
+                                 and item.reply_to_seq == prompt.seq), None)
                 if previous is None or previous.seq != replaces_answer_seq:
                     return self._reject(session, ReasonCode.ILLEGAL_REPLY_TARGET, "请打开该问题的最新回答重新填写")
 
@@ -127,6 +130,7 @@ class DiscussionEngine:
             reply_to_seq=reply_to_seq,
             clarification_answers=clarification_answers,
             replaces_answer_seq=replaces_answer_seq,
+            substantive=substantive,
         )
         if not substantive:
             return self._result(
@@ -144,6 +148,8 @@ class DiscussionEngine:
         session.covered_statements.clear()
         session.challenged_topics.clear()
         session.round_results.clear()
+        session.directed_rounds = 0
+        session.revision_rounds = 0
         session.named_responses.clear()
         session.round_challenged = False
         session.round_kind = None
@@ -227,7 +233,7 @@ class DiscussionEngine:
         if item.topic_id not in session.challenged_topics:
             return self._reject(session, ReasonCode.CHALLENGE_MISSING, "当前议题缺少质疑")
         tradeoffs = self._open_tradeoffs(session)
-        if tradeoffs and self._latest_scorecard(session) is None:
+        if tradeoffs:
             return self._dispatch_scoring(session, tradeoffs)
         if session.open_issues(item.topic_id):
             return self._reject(
@@ -306,6 +312,9 @@ class DiscussionEngine:
             MessageKind.CLARIFICATION,
             "；".join(questions),
             issue_ids=issue_ids,
+            source_seqs=tuple(dict.fromkeys(
+                seq for issue_id in issue_ids for seq in session.issues[issue_id].source_seqs
+            )),
             clarification_questions=questions,
         )
         session.waiting_for = WaitingFor.USER_INPUT
@@ -360,7 +369,7 @@ class DiscussionEngine:
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前不在等待主持人调度")
         if session.tasks:
             return self._reject(session, ReasonCode.PENDING_TASKS, "仍有角色任务未提交")
-        if session.directed_rounds >= session.max_directed_rounds:
+        if session.max_directed_rounds is not None and session.directed_rounds >= session.max_directed_rounds:
             return self._reject(
                 session,
                 ReasonCode.ROUND_LIMIT,
@@ -416,7 +425,7 @@ class DiscussionEngine:
             )
         # 权衡分歧不能靠点名争论收敛：先按维度打分，再由主持人采纳得分最高的方案。
         tradeoffs = self._open_tradeoffs(session)
-        if tradeoffs and self._latest_scorecard(session) is None:
+        if tradeoffs:
             return self._dispatch_scoring(session, tradeoffs)
         self._append(session, Role.HOST, MessageKind.DECISION, "提交候选稿送审")
         return self._enter_phase(session, Phase.DRAFTING)
@@ -481,6 +490,7 @@ class DiscussionEngine:
             issue_ids=output.issue_ids
             or tuple(issue.issue_id for issue in output.raised_issues),
             task_id=task.task_id,
+            output=output,
         ).seq
         session.tasks.pop(task.task_id, None)
         session.round_results[task.task_id] = output
@@ -509,10 +519,26 @@ class DiscussionEngine:
             )
         if any(existing.review_id == review.review_id for existing in session.reviews):
             return self._reject(session, ReasonCode.CONTRACT_MISMATCH, "评审 ID 重复")
-        for finding in review.findings:
+        for finding in (*review.findings, *review.verified_findings):
             problem = citation_problem(session, finding.source_seqs, None)
             if problem:
                 return self._reject(session, *problem)
+
+        pending_verification = {
+            issue.issue_id for issue in session.issues.values()
+            if issue.input_version == session.input_version and issue.status == IssueStatus.ANSWERED
+            and issue.response is not None and issue.severity == Severity.BLOCKING
+        }
+        verified = {
+            finding.issue_id or finding.finding_id for finding in review.verified_findings
+            if finding.source_seqs and finding.summary.strip()
+        }
+        reported = {finding.issue_id or finding.finding_id for finding in review.findings}
+        if (pending_verification - (verified | reported)) or (verified & reported):
+            return self._reject(
+                session, ReasonCode.REVIEW_PASS_WITH_BLOCKING,
+                "评审必须逐条复核待验证的阻断问题，明确通过或保留为未解决",
+            )
 
         if review.verdict == Verdict.PASS:
             blocking_findings = [
@@ -525,7 +551,7 @@ class DiscussionEngine:
                     "仍有关键问题未关闭，不能给出通过结论",
                     detail={"blocking_findings": [f.finding_id for f in blocking_findings]},
                 )
-            session.reviews.append(review)
+            self._record_review(session, review)
             draft.review_id = review.review_id
             self._append(
                 session,
@@ -545,10 +571,11 @@ class DiscussionEngine:
         stalled = review.verdict == Verdict.REVISE and self._revision_stalled(session, draft, review)
         limit_reached = (
             review.verdict == Verdict.REVISE
+            and session.max_revision_rounds is not None
             and session.revision_rounds >= session.max_revision_rounds
         )
         if review.verdict == Verdict.NEEDS_INPUT or stalled or limit_reached:
-            session.reviews.append(review)
+            self._record_review(session, review)
             self._append(
                 session,
                 Role.REVIEWER,
@@ -590,16 +617,15 @@ class DiscussionEngine:
                 )
             return self._result(session, ReasonCode.AWAITING_USER_INPUT, detail=detail)
 
-        # 只调度评审点名的负责角色；未指派的发现拒绝整份评审
-        assignments = self._revision_assignments(session, review)
-        if assignments is None:
+        if not review.findings or any(finding.responsible_role not in NAMABLE_ROLES for finding in review.findings):
             return self._reject(
                 session,
                 ReasonCode.REVISE_WITHOUT_RESPONSIBLE_ROLE,
                 "退回修订必须为每个问题指定负责角色",
             )
 
-        session.reviews.append(review)
+        self._record_review(session, review)
+        draft.review_id = review.review_id
         self._append(
             session,
             Role.REVIEWER,
@@ -607,42 +633,43 @@ class DiscussionEngine:
             self._review_text(review, draft),
             item_refs=tuple(f.target_item for f in review.findings),
         )
-        self._transition(session, SessionStatus.DISCUSSING)
-        decision = self._begin_round(
-            session, RoundKind.REVISION, assignments=assignments
-        )
-        return Decision(
-            ok=decision.ok,
-            code=decision.code,
-            message=decision.message,
-            tasks=decision.tasks,
-            seq=decision.seq,
-            status=decision.status,
-            waiting_for=decision.waiting_for,
-            detail={**dict(decision.detail), "verdict": "revise", "affected_roles": [r.value for r in assignments]},
-        )
+        self._transition(session, SessionStatus.AWAITING_CONFIRMATION)
+        session.waiting_for = WaitingFor.USER_INPUT
+        return self._result(session, ReasonCode.OK, detail={"verdict": "revise", "draft_id": draft.draft_id})
+
+    @staticmethod
+    def _record_review(session: DiscussionSession, review: ReviewResult) -> None:
+        session.reviews.append(review)
+        for finding in review.verified_findings:
+            if not finding.source_seqs or not finding.summary.strip():
+                continue
+            issue = session.issues.get(finding.issue_id or finding.finding_id)
+            if issue and issue.input_version == session.input_version and issue.status == IssueStatus.ANSWERED:
+                issue.status = IssueStatus.CLOSED
+                issue.closed_by_seq = session.next_seq()
 
     def confirm(
         self, session: DiscussionSession, *, draft_id: str, input_version: int
     ) -> Decision:
-        """签收门禁：同版本评审通过、无阻断项、用户明确确认。"""
+        """签收当前评审版本并保留评审原结论。"""
 
         if session.status != SessionStatus.AWAITING_CONFIRMATION:
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不能签收")
         draft = session.current_draft
         if draft is None or draft.draft_id != draft_id:
             return self._reject(session, ReasonCode.STALE_DRAFT, "签收的草稿不是当前版本")
-        if input_version != session.input_version:
+        if input_version != session.input_version or draft.input_version != input_version:
             return self._reject(
                 session, ReasonCode.STALE_INPUT_VERSION, "签收的输入版本不是当前版本"
             )
         review = session.review_of(draft.draft_id)
         if (
             review is None
-            or review.verdict != Verdict.PASS
+            or review.verdict not in (Verdict.PASS, Verdict.REVISE)
+            or review.input_version != input_version
             or draft.review_id != review.review_id
         ):
-            return self._reject(session, ReasonCode.REVIEW_NOT_PASSED, "当前草稿没有同版本通过评审")
+            return self._reject(session, ReasonCode.REVIEW_NOT_PASSED, "当前草稿没有同版本的签收评审")
         blockers = draft_blockers(session)
         if blockers:
             return self._reject(
@@ -653,7 +680,11 @@ class DiscussionEngine:
 
         self._transition(session, SessionStatus.COMPLETED)
         session.waiting_for = WaitingFor.NONE
-        self._append(session, Role.USER, MessageKind.DECISION, "确认并签收当前版本")
+        text = f"签收草稿 v{draft.version}"
+        if review.verdict == Verdict.REVISE:
+            text += "（保留建议修订的评审意见）"
+        self._append(session, Role.USER, MessageKind.DECISION, text,
+                     item_refs=(draft.draft_id, review.review_id))
         return self._result(
             session,
             ReasonCode.OK,
@@ -668,17 +699,42 @@ class DiscussionEngine:
             },
         )
 
-    def require_changes(self, session: DiscussionSession, reason: str) -> Decision:
-        """用户要求修改通过评审的版本。"""
-
-        if session.status != SessionStatus.AWAITING_CONFIRMATION:
+    def require_changes(self, session: DiscussionSession, reason: str, *, draft_id: str | None = None) -> Decision:
+        """收到用户退回后，按本版评审问题和用户补充意见派发修订。"""
+        if session.status not in (SessionStatus.AWAITING_CONFIRMATION, SessionStatus.COMPLETED):
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不能要求修改")
-        if not reason.strip():
+        draft = session.current_draft
+        if draft is None or (draft_id is not None and draft_id != draft.draft_id):
+            return self._reject(session, ReasonCode.STALE_DRAFT, "请基于当前草稿提交修订意见")
+        review = session.review_of(draft.draft_id)
+        if review is None or review.verdict not in (Verdict.PASS, Verdict.REVISE):
+            return self._reject(session, ReasonCode.INVALID_STATUS, "当前草稿尚未完成评审")
+        note = reason.strip() if isinstance(reason, str) else ""
+        if not note and review.verdict == Verdict.PASS:
             return self._reject(session, ReasonCode.REASON_REQUIRED, "要求修改需要说明理由")
+        item = session.current_item()
+        if item is None:
+            return self._reject(session, ReasonCode.INVALID_TOPIC, "当前没有可修订的议题")
+
+        assignments = self._revision_assignments(session, review) if review.verdict == Verdict.REVISE else {}
+        if assignments is None:
+            return self._reject(session, ReasonCode.REVISE_WITHOUT_RESPONSIBLE_ROLE, "评审问题缺少负责角色")
+        message = self._append(
+            session, Role.USER, MessageKind.DECISION,
+            f"退回草稿 v{draft.version}：{note or '按本版评审意见修订'}",
+            item_refs=(draft.draft_id,),
+        )
+        if note:
+            role = Role.PRODUCT if Role.PRODUCT in item.role_scope else item.required_roles[0]
+            issue_id = f"user-revision-{message.seq}"
+            session.issues[issue_id] = Issue(
+                issue_id=issue_id, topic_id=item.topic_id, raised_by=Role.USER, summary=note,
+                severity=Severity.MAJOR, source_seqs=(message.seq,), assignee=role,
+                input_version=session.input_version,
+            )
+            assignments[role] = (*assignments.get(role, ()), issue_id)
         self._transition(session, SessionStatus.DISCUSSING)
-        session.waiting_for = WaitingFor.HOST_DECISION
-        self._append(session, Role.USER, MessageKind.DECISION, f"要求修改：{reason}")
-        return self._result(session, ReasonCode.AWAITING_HOST_DECISION)
+        return self._begin_round(session, RoundKind.REVISION, assignments=assignments)
 
     # ------------------------------------------------------------ 故障与预算
     def record_failure(
@@ -856,6 +912,8 @@ class DiscussionEngine:
         return self._advance(session, phase)
 
     def _advance(self, session: DiscussionSession, phase: Phase) -> Decision:
+        if phase == Phase.STANCES:
+            return self._complete_scoring(session)
         if phase == Phase.STATEMENTS:
             return self._enter_phase(session, Phase.CHALLENGE)
         if phase == Phase.RESPONSES:
@@ -886,17 +944,18 @@ class DiscussionEngine:
                 "revision_rounds": session.revision_rounds,
                 "max_directed_rounds": session.max_directed_rounds,
                 "max_revision_rounds": session.max_revision_rounds,
-                "remaining_directed_rounds": max(
-                    0, session.max_directed_rounds - session.directed_rounds
+                "remaining_directed_rounds": (
+                    max(0, session.max_directed_rounds - session.directed_rounds)
+                    if session.max_directed_rounds is not None else None
                 ),
-                "remaining_revision_rounds": max(
-                    0, session.max_revision_rounds - session.revision_rounds
+                "remaining_revision_rounds": (
+                    max(0, session.max_revision_rounds - session.revision_rounds)
+                    if session.max_revision_rounds is not None else None
                 ),
                 "tradeoff_issue_ids": [
                     issue.issue_id for issue in self._open_tradeoffs(session)
                 ],
-                "scoring_required": bool(self._open_tradeoffs(session))
-                and self._latest_scorecard(session) is None,
+                "scoring_required": bool(self._open_tradeoffs(session)),
                 "chosen_option_id": session.chosen_option_id,
             },
         )
@@ -953,6 +1012,13 @@ class DiscussionEngine:
         if task.kind == TaskKind.RESPONSE:
             if not output.text.strip():
                 return (ReasonCode.EMPTY_OUTPUT, "回应正文不能为空")
+            responses = {response.issue_id: response for response in output.responses}
+            if len(responses) != len(output.responses) or (
+                responses and (set(responses) != set(output.issue_ids) or set(responses) != set(task.issue_ids))
+            ):
+                return (ReasonCode.INVALID_ISSUE, "每个指派问题都必须有唯一的逐条回应")
+            if len(output.issue_ids) > 1 and not responses:
+                return (ReasonCode.INVALID_ISSUE, "多个问题必须分别提交处理方式和验证方法")
             if not output.issue_ids:
                 return (ReasonCode.INVALID_ISSUE, "回应必须针对被点名的问题")
             for issue_id in output.issue_ids:
@@ -968,11 +1034,32 @@ class DiscussionEngine:
                     return (ReasonCode.ISSUE_NEEDS_USER, f"问题 {issue_id} 等待用户补充事实")
                 if issue.status != IssueStatus.OPEN:
                     return (ReasonCode.ISSUE_ALREADY_CLOSED, f"问题 {issue_id} 已处理")
-                if issue.severity == Severity.BLOCKING and not output.evidence:
+                response = responses.get(issue_id)
+                if response:
+                    if not response.treatment.strip() or not response.verification.strip():
+                        return (ReasonCode.MISSING_EVIDENCE, "逐条回应必须包含处理方式和验证方法")
+                    problem = citation_problem(session, response.source_seqs, None)
+                    if problem:
+                        return problem
+                if issue.severity == Severity.BLOCKING and not (response or output.evidence):
                     return (
                         ReasonCode.MISSING_EVIDENCE,
                         f"阻断问题 {issue_id} 关闭前必须给出证据或可验证的处理方式",
                     )
+            return None
+
+        if task.kind == TaskKind.STANCE:
+            card = self._latest_scorecard(session)
+            option_ids = [stance.option_id for stance in output.stances]
+            if (not card or len(option_ids) != len(set(option_ids))
+                    or set(option_ids) != {option.option_id for option in card.options}):
+                return (ReasonCode.INVALID_SCORECARD, "必须逐项提交本次备选方案的立场")
+            for stance in output.stances:
+                if stance.position not in {"support", "oppose", "conditional"} or not stance.reason.strip():
+                    return (ReasonCode.INVALID_SCORECARD, "每项立场必须包含明确的选择及理由")
+                problem = citation_problem(session, stance.source_seqs, None)
+                if problem:
+                    return problem
             return None
 
         if task.kind == TaskKind.INTEGRATION:
@@ -1028,12 +1115,22 @@ class DiscussionEngine:
                     closed_by_seq=None,
                     input_version=session.input_version,
                 )
+        elif task.kind == TaskKind.STANCE:
+            card = self._latest_scorecard(session)
+            if card is not None:
+                index = session.scorecards.index(card)
+                session.scorecards[index] = replace(card, stances={**card.stances, task.role: output.stances})
         elif task.kind == TaskKind.RESPONSE:
+            responses = {response.issue_id: response for response in output.responses}
             for issue_id in output.issue_ids:
                 issue = session.issues.get(issue_id)
                 if issue is not None and issue.status == IssueStatus.OPEN:
                     issue.status = IssueStatus.ANSWERED
-                    issue.closed_by_seq = seq
+                    issue.response = responses.get(issue_id)
+                    if issue.response is None and issue.severity == Severity.BLOCKING:
+                        issue.response = IssueResponse(issue_id, output.text, "；".join(output.evidence), output.source_seqs)
+                    issue.response_seq = seq
+                    issue.closed_by_seq = None if issue.response else seq
                     issue.assignee = task.role
 
     @staticmethod
@@ -1069,6 +1166,7 @@ class DiscussionEngine:
             snapshot_ref=session.snapshot_ref,
             input_version=session.input_version,
             message_seqs=self._context_seqs(session),
+            issue_ids=tuple(issue.issue_id for issue in issues),
         )
         session.tasks[task.task_id] = task
         session.dispatch_units += 1
@@ -1089,7 +1187,6 @@ class DiscussionEngine:
     ) -> Decision:
         card = output.scorecard
         assert card is not None  # _validate_payload 已拦截
-        ranked = rank_options(card.options, card.weights)
         stored = replace(
             card,
             scorecard_id=f"{session.session_id}:score:{len(session.scorecards) + 1}",
@@ -1097,28 +1194,49 @@ class DiscussionEngine:
             topic_id=session.topic_id or "",
             input_version=session.input_version,
             weights=normalize_weights(card.weights) or {},
-            chosen_option_id=ranked[0].option_id,
+            chosen_option_id="",
+            stances={},
         )
         session.scorecards.append(stored)
-        session.chosen_option_id = stored.chosen_option_id
-        # 打分即该议题权衡分歧的收敛方式：关闭相关分歧，允许继续成稿或切议题。
-        for issue in self._open_tradeoffs(session):
-            issue.status = IssueStatus.CLOSED
-            issue.closed_by_seq = seq
-            issue.assignee = Role.HOST
-        ranking = "；".join(
-            f"{item.rank}. {item.option_id}「{item.title}」{item.total:.2f}" for item in ranked
+        item = session.current_item()
+        message_seqs = tuple(number for number in self._context_seqs(session) if number < seq)
+        stance_tasks = tuple(
+            SpeakerTask(
+                task_id=f"{stored.scorecard_id}:stance:{role.value}",
+                session_id=session.session_id, role=role, kind=TaskKind.STANCE, phase=Phase.STANCES,
+                round_kind=session.round_kind or RoundKind.FIRST, round_no=session.round_no,
+                topic_id=stored.topic_id, snapshot_ref=session.snapshot_ref,
+                input_version=session.input_version, message_seqs=message_seqs,
+            )
+            for role in (item.required_roles if item else ())
         )
+        for task in stance_tasks:
+            session.tasks[task.task_id] = task
+        session.dispatch_units += len(stance_tasks)
+        if not stance_tasks:
+            return self._complete_scoring(session)
+        session.phase = Phase.STANCES
+        session.waiting_for = WaitingFor.ROLE_RESULTS
+        return self._result(session, ReasonCode.OK, tasks=stance_tasks, detail={"scorecard_id": stored.scorecard_id})
+
+    def _complete_scoring(self, session: DiscussionSession) -> Decision:
+        card = self._latest_scorecard(session)
+        if card is None:
+            return self._reject(session, ReasonCode.INVALID_SCORECARD, "当前议题缺少评分卡")
+        ranked = rank_options(card.options, card.weights)
+        stored = replace(card, chosen_option_id=ranked[0].option_id)
+        session.scorecards[session.scorecards.index(card)] = stored
+        session.chosen_option_id = stored.chosen_option_id
+        ranking = "；".join(f"{item.rank}. {item.option_id}「{item.title}」{item.total:.2f}" for item in ranked)
         text = f"收敛评分：{ranking}。采纳 {stored.chosen_option_id}。"
         if stored.rationale:
             text += f"依据：{stored.rationale}"
-        self._append(
-            session,
-            Role.HOST,
-            MessageKind.DECISION,
-            text,
-            item_refs=tuple(item.option_id for item in ranked),
-        )
+        decision = self._append(session, Role.HOST, MessageKind.DECISION, text,
+                                item_refs=tuple(item.option_id for item in ranked))
+        for issue in self._open_tradeoffs(session):
+            issue.status = IssueStatus.CLOSED
+            issue.closed_by_seq = decision.seq
+            issue.assignee = Role.HOST
         session.waiting_for = WaitingFor.HOST_DECISION
         return self._result(
             session,
@@ -1160,6 +1278,8 @@ class DiscussionEngine:
             agreements=tuple(output.agreements),
             alternatives=tuple(output.alternatives),
             disagreements=tuple(output.disagreements),
+            assumptions=tuple(output.assumptions),
+            risks=tuple(output.risks),
             scorecard_id=scorecard.scorecard_id if scorecard else None,
             chosen_option_id=scorecard.chosen_option_id if scorecard else None,
         )
@@ -1211,12 +1331,55 @@ class DiscussionEngine:
             item.draft_id: item for item in session.reviews
             if item.input_version == draft.input_version and item.verdict == Verdict.REVISE
         }
-        return any(
-            prior.draft_id in prior_reviews
-            and scope(prior_reviews[prior.draft_id]) == current_scope
-            and content(prior) == current_content
-            for prior in session.drafts if prior.draft_id != draft.draft_id
-        )
+        previous = [prior for prior in session.drafts if prior.draft_id in prior_reviews]
+        if any(scope(prior_reviews[prior.draft_id]) == current_scope
+               and content(prior) == current_content for prior in previous):
+            return True
+
+        # Look for progress on the affected parts, rather than rewarding edits
+        # elsewhere in the draft. Compare two review rounds to detect A/B churn.
+        targets = {finding.target_item for finding in review.findings}
+
+        def normalize(value):
+            if isinstance(value, str):
+                return re.sub(r"\s+", "", value).rstrip("。！？；.;!?")
+            if isinstance(value, Mapping):
+                return {key: normalize(item) for key, item in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [normalize(item) for item in value]
+            return value
+
+        def substance(revision):
+            body = content(revision)
+            requirements = {
+                item.get("id"): item for item in body.get("requirements", ()) if isinstance(item, Mapping)
+            }
+            if all(target in current_content or target in current_requirements for target in targets):
+                return normalize({
+                    target: body.get(target, requirements.get(target)) for target in targets
+                })
+            return normalize({
+                key: value for key, value in body.items()
+                if key not in {"product_name", "background", "supplemental_text"} - targets
+            })
+
+        def affected(result):
+            return {(finding.target_item, finding.severity) for finding in result.findings}
+
+        current_requirements = {
+            item.get("id") for item in current_content.get("requirements", ()) if isinstance(item, Mapping)
+        }
+        recent = [
+            prior for prior in session.drafts
+            if prior.input_version == draft.input_version and prior.version < draft.version
+        ][-2:]
+        if len(recent) != 2 or any(
+            prior.draft_id not in prior_reviews or affected(prior_reviews[prior.draft_id]) != affected(review)
+            for prior in recent
+        ):
+            return False
+        current_substance = substance(draft)
+        return any(substance(prior) == current_substance for prior in recent)
 
     def _revision_assignments(
         self, session: DiscussionSession, review: ReviewResult
@@ -1258,6 +1421,8 @@ class DiscussionEngine:
                 existing.assignee = role
                 existing.needs_user = False
                 existing.closed_by_seq = None
+                existing.response = None
+                existing.response_seq = None
                 existing.input_version = session.input_version
             grouped.setdefault(role, []).append(issue_id)
         return {role: tuple(ids) for role, ids in grouped.items()}
@@ -1306,6 +1471,8 @@ class DiscussionEngine:
         clarification_questions: tuple[str, ...] = (),
         clarification_answers: tuple[ClarificationAnswer, ...] = (),
         replaces_answer_seq: int | None = None,
+        substantive: bool = True,
+        output: SpeakerOutput | None = None,
     ) -> Message:
         message = Message(
             seq=session.next_seq(),
@@ -1323,6 +1490,10 @@ class DiscussionEngine:
             clarification_questions=clarification_questions,
             clarification_answers=clarification_answers,
             replaces_answer_seq=replaces_answer_seq,
+            substantive=substantive,
+            **({key: getattr(output, key) for key in (
+                "basis", "verification", "agreements", "alternatives", "disagreements", "assumptions", "risks",
+            )} if output is not None else {}),
         )
         session.messages.append(message)
         return message
@@ -1379,6 +1550,7 @@ _MESSAGE_KIND: dict[TaskKind, MessageKind] = {
     TaskKind.STATEMENT: MessageKind.STATEMENT,
     TaskKind.CHALLENGE: MessageKind.CHALLENGE,
     TaskKind.RESPONSE: MessageKind.RESPONSE,
+    TaskKind.STANCE: MessageKind.STANCE,
     TaskKind.INTEGRATION: MessageKind.INTEGRATION,
     TaskKind.DRAFT: MessageKind.DRAFT,
     TaskKind.SCORING: MessageKind.DECISION,

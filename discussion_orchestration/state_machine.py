@@ -13,12 +13,12 @@ ALLOWED_TRANSITIONS: dict[tuple[SessionStatus, SessionStatus], str] = {
     (SessionStatus.CLARIFYING, SessionStatus.DISCUSSING): "host_agenda_ready",
     (SessionStatus.DISCUSSING, SessionStatus.CLARIFYING): "host_or_review_needs_user",
     (SessionStatus.DISCUSSING, SessionStatus.REVIEWING): "candidate_draft_frozen",
-    (SessionStatus.REVIEWING, SessionStatus.DISCUSSING): "review_revise",
     (SessionStatus.REVIEWING, SessionStatus.CLARIFYING): "review_needs_input",
-    (SessionStatus.REVIEWING, SessionStatus.AWAITING_CONFIRMATION): "review_pass",
+    (SessionStatus.REVIEWING, SessionStatus.AWAITING_CONFIRMATION): "review_ready_for_user",
     (SessionStatus.AWAITING_CONFIRMATION, SessionStatus.COMPLETED): "user_confirm",
     (SessionStatus.AWAITING_CONFIRMATION, SessionStatus.DISCUSSING): "user_requires_changes",
     (SessionStatus.AWAITING_CONFIRMATION, SessionStatus.CLARIFYING): "user_new_input",
+    (SessionStatus.COMPLETED, SessionStatus.DISCUSSING): "user_reopens_signed_spec",
 }
 
 TERMINAL_STATUSES: frozenset[SessionStatus] = frozenset(

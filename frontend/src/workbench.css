@@ -27,11 +27,25 @@
 .workbench-shell .brand-icon { background: #255c48; color: #fff; width: 36px; height: 36px; font-size: 21px; }
 .workbench-shell .top-actions { gap: 8px; }
 .workbench-shell .live-workspace { grid-template-columns: minmax(186px, 220px) minmax(0, 1fr) clamp(330px, 30vw, 490px); min-height: calc(100dvh - 64px); }
+.workbench-shell .live-workspace.spec-collapsed { grid-template-columns: minmax(186px, 220px) minmax(0, 1fr); }
+.workbench-shell .spec[hidden] { display: none; }
 .workbench-shell .rail, .workbench-shell .spec { background: var(--subtle); }
 .workbench-shell .rail { padding: 24px 16px; max-height: max(530px, calc(100dvh - 64px)); overflow-y: auto; }
 .workbench-shell .rail h2 { color: var(--muted); font-size: 12px; font-weight: 650; margin: 0 0 10px; }
 .workbench-shell .session-status { background: #e6ede1; border: 1px solid #d9e4d6; padding: 12px; }
 .session-status strong { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; overflow-wrap: anywhere; }
+.local-discussions { margin: 0 0 20px; color: var(--muted); font-size: 12px; }
+.local-discussions summary { cursor: pointer; font-weight: 650; margin-bottom: 8px; }
+.local-discussions ul { margin: 0; padding: 0 3px 0 0; list-style: none; max-height: 220px; overflow-y: auto; }
+.local-discussions li + li { margin-top: 4px; }
+.history-row { display: flex; align-items: center; gap: 3px; border: 1px solid transparent; border-radius: 8px; }
+.history-row:has([aria-current="true"]) { border-color: #d9e4d6; background: #e6ede1; }
+.local-discussions .history-open { flex: 1; min-width: 0; padding: 7px 8px; text-align: left; font-size: inherit; border-color: transparent; background: transparent; }
+.local-discussions .history-delete { flex: none; margin-right: 5px; padding: 4px 6px; font-size: inherit; color: #8b3532; border-color: transparent; background: transparent; }
+.local-discussions .history-delete:hover { background: #f7e9e5; }
+.history-title { display: block; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-meta { display: flex; justify-content: space-between; gap: 4px; color: var(--muted); margin-top: 3px; }
+.local-discussions .history-more { margin-top: 8px; padding: 4px 8px; font-size: inherit; }
 .workbench-shell .roles li { padding: 3px 0; color: var(--ink); }
 .workbench-shell .role-task { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px; text-align: left; font-size: 13px; }
 .task-chevron { margin-left: auto; color: var(--accent); font-size: 17px; }
@@ -40,6 +54,7 @@
 .roles i[data-status='running'] { background: #2563a6; }
 .roles i[data-status='done'], .roles i[data-status='succeeded'] { background: #278457; }
 .roles i[data-status='failed'], .roles i[data-status='timed_out'] { background: #b34047; }
+.model-disclosure { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 8px; }
 .sidebar-tools { display: grid; gap: 8px; margin-top: 16px; }
 .sidebar-tools > details { min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: #fbfcf8; }
 .sidebar-tools > details > .live-form { margin-top: 10px; }
@@ -65,7 +80,7 @@
 .clarification-questions { display: grid; gap: 14px; }
 .clarification-options { display: grid; gap: 2px; min-width: 0; padding: 0 0 12px; margin: 0; border: 0; border-bottom: 1px solid var(--border); }
 .clarification-options:last-child { padding-bottom: 0; border-bottom: 0; }
-.clarification-options legend { padding: 0; margin-bottom: 6px; font-size: 14px; font-weight: 650; line-height: 1.5; overflow-wrap: anywhere; }
+.clarification-options legend { white-space: pre-wrap; padding: 0; margin-bottom: 6px; font-size: 14px; font-weight: 650; line-height: 1.5; overflow-wrap: anywhere; }
 .workbench-shell .clarification-option { display: flex; align-items: start; gap: 8px; padding: 5px 6px; color: var(--ink); line-height: 1.5; border-radius: 5px; cursor: pointer; }
 .clarification-option:hover { background: #eeefe9; }
 .clarification-option:has(input:checked) { background: #e1eee2; }
@@ -83,8 +98,11 @@
 .workbench-shell .pane-title { min-height: 78px; padding: 16px clamp(14px, 2vw, 28px); }
 .workbench-shell .pane-title h1 { font-size: 23px; }
 .pane-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px 12px; }
-.new-chat { white-space: nowrap; font-size: 13px; }
+.rail-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.workbench-shell .rail-toolbar h2 { margin: 0; }
+.rail-toolbar .new-chat { padding: 5px 9px; white-space: nowrap; font-size: 12px; }
 .pane-actions a { display: none; }
+.workbench-shell .spec-toggle { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
 .workbench-shell a { color: var(--accent); }
 .workbench-shell .thread { padding-block: 20px; scrollbar-color: #bdcbbd transparent; }
 .workbench-shell .thread > * { max-width: 760px; margin-inline: auto; }
@@ -94,6 +112,7 @@
 .workbench-shell summary { color: var(--accent); font-size: 13px; cursor: pointer; }
 .workbench-shell .message { border-color: var(--border); padding: 16px 0; }
 .workbench-shell .message-body p { color: var(--ink); }
+.clarification-replies { display: grid; gap: 10px; }
 .discussion-message-text { display: grid; gap: 12px; margin-top: 7px; max-width: 670px; color: var(--ink); font-size: 14px; line-height: 1.7; }
 .discussion-message-text h3 { font-size: 14px; font-weight: 700; color: var(--accent); margin-bottom: 3px; }
 .workbench-shell .discussion-message-text p { margin: 0 0 6px; line-height: inherit; white-space: normal; }
@@ -159,10 +178,12 @@
 .divergence li { margin-top: 2px; }
 @media (max-width: 1000px) {
   .workbench-shell .live-workspace { grid-template-columns: 164px minmax(0, 1fr) minmax(280px, 32vw); }
+  .workbench-shell .live-workspace.spec-collapsed { grid-template-columns: 164px minmax(0, 1fr); }
   .workbench-shell .rail { padding-inline: 10px; }
 }
 @media (max-width: 810px) {
   .workbench-shell .live-workspace { grid-template-columns: minmax(0, 1fr) minmax(260px, 36vw); }
+  .workbench-shell .live-workspace.spec-collapsed { grid-template-columns: minmax(0, 1fr); }
   .workbench-shell .rail { padding: 10px 14px; max-height: none; }
   .workbench-shell .discussion, .workbench-shell .spec { height: max(590px, 76dvh); }
   .workbench-shell .rail > .sidebar-tools { display: grid; }

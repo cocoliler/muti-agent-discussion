@@ -60,7 +60,7 @@ function blocks(text: string) {
   return result;
 }
 
-function inlineText(text: string) {
+export function formatInlineText(text: string) {
   return text.split(/\*\*([^*\n]+)\*\*/).map((part, index) => (
     index % 2 === 0 ? part : <strong key={index}>{part}</strong>
   ));
@@ -70,11 +70,11 @@ export function DiscussionMessageText({ text, formatted }: { text: string; forma
   if (!formatted) return <p>{text}</p>;
 
   return <div className="discussion-message-text">{sections(text).map((section, sectionIndex) => <div key={sectionIndex}>
-    {section.heading && <h3>{inlineText(section.heading)}</h3>}
+    {section.heading && <h3>{formatInlineText(section.heading)}</h3>}
     {blocks(section.text).map(({ kind, lines }, index) => {
-      if (kind === 'paragraph') return <div key={index}>{lines.map((line, lineIndex) => <p key={lineIndex}>{inlineText(line.text)}</p>)}</div>;
+      if (kind === 'paragraph') return <div key={index}>{lines.map((line, lineIndex) => <p key={lineIndex}>{formatInlineText(line.text)}</p>)}</div>;
       const List = kind;
-      return <List key={index}>{lines.map((line, lineIndex) => <li key={lineIndex} value={line.number}>{inlineText(line.text)}</li>)}</List>;
+      return <List key={index}>{lines.map((line, lineIndex) => <li key={lineIndex} value={line.number}>{formatInlineText(line.text)}</li>)}</List>;
     })}
   </div>)}</div>;
 }

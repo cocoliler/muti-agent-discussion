@@ -10,12 +10,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime
 import hashlib
 import json
 import os
 import uuid
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -32,6 +36,8 @@ from .schemas import (
     ConfirmEnvelope,
     ConfirmRequest,
     CreateDiscussionRequest,
+    DiscussionList,
+    DraftDetail,
     DecisionEnvelope,
     MessagePage,
     PostMessageRequest,
@@ -139,7 +145,6 @@ def create_router(
     with_export: bool = False,
     with_agents: bool = False,
 ) -> APIRouter:
-    router = APIRouter(prefix="/api/v1", tags=["discussions"])
     agents = AgentExecution() if with_agents else None
 
     def configured_service() -> DiscussionService:
@@ -148,10 +153,26 @@ def create_router(
             service.agent_mode = agents.mode
         return service
 
+    @asynccontextmanager
+    async def lifespan(_app):
+        if agents is None or agents.mode == "off":
+            yield
+            return
+        recovery = asyncio.create_task(agents.recover(configured_service()))
+        try:
+            yield
+        finally:
+            recovery.cancel()
+            await asyncio.gather(recovery, return_exceptions=True)
+
+    router = APIRouter(prefix="/api/v1", tags=["discussions"], lifespan=lifespan)
     service_dep = Depends(configured_service)
 
-    def export_url(sid: str) -> str | None:
-        return f"/api/v1/discussions/{sid}/export" if with_export else None
+    def export_url(sid: str, draft_id: str | None = None) -> str | None:
+        if not with_export:
+            return None
+        path = f"/api/v1/discussions/{sid}/export"
+        return f"{path}?{urlencode({'draft_id': draft_id})}" if draft_id else path
 
     @router.post(
         "/projects/{project_id}/discussions",
@@ -182,11 +203,39 @@ def create_router(
             background_tasks.add_task(agents.run, service, payload["id"])
         return JSONResponse(payload, status_code=status)
 
+    @router.get("/discussions", response_model=DiscussionList, operation_id="listLocalDiscussions")
+    def list_discussions(
+        limit: int = Query(default=25, ge=1, le=100),
+        cursor: str | None = Query(default=None, max_length=100),
+        service: DiscussionService = service_dep,
+    ) -> Any:
+        before = None
+        if cursor is not None:
+            updated_at, separator, session_id = cursor.rpartition("|")
+            try:
+                if not separator or not updated_at.endswith("Z"):
+                    raise ValueError
+                datetime.fromisoformat(updated_at)
+            except ValueError as exc:
+                raise ApiError("VALIDATION_FAILED", "无效的聊天历史游标", status=422) from exc
+            before = (updated_at, _uuid(session_id, "cursor"))
+        return service.discussions(limit, before)
+
+    @router.get("/discussions/{session_id}/drafts/{draft_id}", response_model=DraftDetail,
+                operation_id="getDiscussionDraft")
+    def get_draft(session_id: str, draft_id: str, service: DiscussionService = service_dep) -> Any:
+        return service.draft(_uuid(session_id, "session_id"), draft_id)
+
+    @router.delete("/discussions/{session_id}", operation_id="deleteLocalDiscussion")
+    def delete_discussion(session_id: str, service: DiscussionService = service_dep) -> dict[str, bool]:
+        service.delete(_uuid(session_id, "session_id"))
+        return {"deleted": True}
+
     @router.get("/discussions/{session_id}", response_model=SessionView, operation_id="getDiscussion")
     def get_discussion(session_id: str, service: DiscussionService = service_dep) -> Any:
         sid = _uuid(session_id, "session_id")
         state = service.view(sid)
-        if state["status"] == "completed":
+        if state["status"] == "completed" or any(draft.get("signed") for draft in state.get("drafts", ())):
             state["export_url"] = export_url(sid)
         return state
 
@@ -262,7 +311,7 @@ def create_router(
             scope=f"POST /api/v1/discussions/{sid}/actions",
             request_id=_request_id(request),
         )
-        if agents is not None and payload["decision"]["ok"] and body.type in {"run_agents", "submit_agenda", "submit_output", "propose",
+        if agents is not None and payload["decision"]["ok"] and body.type in {"run_agents", "submit_agenda", "submit_output", "submit_review", "propose",
                                                       "require_changes", "resume"}:
             background_tasks.add_task(agents.run, service, sid)
         return JSONResponse(payload, status_code=status)
@@ -294,7 +343,7 @@ def create_router(
         )
         # 下载地址取决于当前应用挂载的路由，旧签收回执也可在升级后重放。
         if payload.get("handoff"):
-            payload["handoff"]["export_url"] = export_url(sid)
+            payload["handoff"]["export_url"] = export_url(sid, payload["handoff"]["draft_id"])
         return JSONResponse(payload, status_code=status)
 
     if with_export:

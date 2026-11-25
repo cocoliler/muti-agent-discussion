@@ -1,6 +1,7 @@
 """FlowStudio 讨论角色的任务快照、提示构造与结构化输出边界。"""
 
 import json
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 
@@ -17,6 +18,7 @@ Seqs = list[Positive]
 SPEC_FILE = Path(__file__).resolve().parents[2] / "tech/artifacts/schema/design-spec.schema.json"
 SPEC_SCHEMA = json.loads(SPEC_FILE.read_text(encoding="utf-8"))
 SPEC_VALIDATOR = Draft202012Validator(SPEC_SCHEMA)
+TECHNICAL_CONSTRAINTS_SCHEMA = SPEC_SCHEMA["properties"]["technical_constraints"]
 
 
 class RoleRuleError(ValueError):
@@ -40,7 +42,10 @@ def check_spec(content):
     """使用仓库共享 Schema，并补查空白正文与重复需求 ID。"""
     error = next(SPEC_VALIDATOR.iter_errors(content), None)
     if error is not None:
-        raise RoleRuleError(f"invalid DesignSpecContent at {list(error.absolute_path)}: {error.validator}")
+        diagnostic = f"invalid DesignSpecContent at {list(error.absolute_path)}: {error.validator}"
+        if error.validator in {"maxLength", "maxItems"} and isinstance(error.instance, (str, list)):
+            diagnostic += f" (actual {len(error.instance)}, limit {error.validator_value})"
+        raise RoleRuleError(diagnostic)
     for key, value in content.items():
         if key == "requirements":
             for index, req in enumerate(value):
@@ -53,6 +58,36 @@ def check_spec(content):
     ids = [req["id"] for req in content["requirements"]]
     unique(ids, "requirement IDs")
     return set(ids)
+
+
+def split_technical_constraints(content: dict[str, Any]) -> dict[str, Any]:
+    """Keep complete sentences and their original text when a model combines constraints."""
+    constraints = content.get("technical_constraints")
+    if not isinstance(constraints, list):
+        return content
+    limit = TECHNICAL_CONSTRAINTS_SCHEMA["items"]["maxLength"]
+    entries = []
+    changed = False
+    for entry in constraints:
+        if not isinstance(entry, str) or len(entry) <= limit:
+            entries.append(entry)
+            continue
+        sentences = re.split(r"(?<=[。！？])(?=\s*\S)", entry)
+        if len(sentences) == 1 or any(len(sentence) > limit or not sentence.strip() for sentence in sentences):
+            entries.append(entry)
+            continue
+        chunk = sentences[0]
+        for sentence in sentences[1:]:
+            if len(chunk) + len(sentence) > limit:
+                entries.append(chunk)
+                chunk = sentence
+            else:
+                chunk += sentence
+        entries.append(chunk)
+        changed = True
+    if changed and len(entries) <= TECHNICAL_CONSTRAINTS_SCHEMA["maxItems"]:
+        return {**content, "technical_constraints": entries}
+    return content
 
 
 def check_source_map(content, source_map, visible):
@@ -79,6 +114,7 @@ class SourceMessage(Contract):
     seq: Positive
     role: Role | Literal["user"]
     text: Text
+    analysis: dict[str, str | list[Text]] | None = None
 
 
 class Issue(Contract):
@@ -105,6 +141,21 @@ class DraftSnapshot(Contract):
     revision: Positive
     content: dict[str, Any]
     source_map: dict[Text, Seqs]
+    analysis: dict[str, str | list[Text]] | None = None
+
+
+class CandidateOption(Contract):
+    option_id: Text
+    title: Text
+
+
+_ROLE_TASK_KINDS = {
+    "host": {"agenda", "scoring"},
+    "critic": {"challenge"},
+    "scribe": {"integration", "draft"},
+    "reviewer": {"review"},
+    **{role: {"statement", "response", "stance"} for role in get_args(Specialist)},
+}
 
 
 class RoleRequest(Contract):
@@ -122,15 +173,29 @@ class RoleRequest(Contract):
     round: Positive = 1
     messages: list[SourceMessage] = Field(default_factory=list)
     consensus: list[Text] = Field(default_factory=list)
+    candidate_options: list[CandidateOption] = Field(default_factory=list)
+    previous_requirement_ids: list[Text] = Field(default_factory=list)
     issues: list[PriorIssue] = Field(default_factory=list)
     allowed_roles: list[Specialist] = Field(default_factory=lambda: list(get_args(Specialist)))
     draft: DraftSnapshot | None = None
 
     @model_validator(mode="after")
     def validate_scope(self):
+        if self.kind and self.kind not in _ROLE_TASK_KINDS[self.role]:
+            raise RoleRuleError("task kind is not valid for the assigned role")
+        unique([option.option_id for option in self.candidate_options], "candidate option IDs")
+        if self.kind == "stance" and not 2 <= len(self.candidate_options) <= 8:
+            raise RoleRuleError("stance tasks need between two and eight candidate options")
+        if self.kind != "stance" and self.candidate_options:
+            raise RoleRuleError("candidate options are reserved for stance tasks")
+        if self.kind == "response" and (not self.issues or any(issue.owner_role != self.role for issue in self.issues)):
+            raise RoleRuleError("response tasks require issues assigned to the responding role")
         seqs = [message.seq for message in self.messages]
         unique(seqs, "message seq")
         unique(self.allowed_roles, "allowed_roles")
+        unique(self.previous_requirement_ids, "previous requirement IDs")
+        if self.previous_requirement_ids and (self.role != "scribe" or self.kind != "draft" or self.draft):
+            raise RoleRuleError("previous_requirement_ids is reserved for drafting without the parent body")
         unique([issue.issue_id for issue in self.issues], "prior issue IDs")
         visible = set(seqs)
         for message in self.messages:
@@ -192,14 +257,31 @@ class HostOutput(RoleOutput):
     scorecard: ScorecardInput | None = None
 
 
+class IssueResponseInput(Contract):
+    issue_id: Text
+    treatment: Text
+    verification: Text
+    source_seqs: Seqs = Field(default_factory=list)
+
+
+class OptionStanceInput(Contract):
+    option_id: Text
+    position: Literal["support", "oppose", "conditional"]
+    reason: Text
+    source_seqs: Seqs = Field(default_factory=list)
+
+
 class OpinionOutput(RoleOutput):
     basis: Literal["user_statement", "evidence", "assumption", "not_applicable"]
     verification: Text | None = None
+    responses: list[IssueResponseInput] = Field(default_factory=list)
+    stances: list[OptionStanceInput] = Field(default_factory=list)
 
 
 class CriticOutput(RoleOutput):
     target_roles: Annotated[list[Specialist], Field(min_length=1)]
     verification: Text
+    user_question: Annotated[Text, Field(max_length=200)] | None = None
     #: 本轮质疑的分歧类型，服务端据此决定交角色回应还是交用户裁决。
     divergence: Literal["fact", "value", "tradeoff"] = "fact"
 
@@ -256,7 +338,7 @@ OUTPUT_MODELS: dict[str, type[RoleOutput]] = {
 }
 
 ROLE_INSTRUCTIONS = {
-    "host": "你是主持人。说明本轮议题与动作理由，限议题相关角色点名。DISCUSS 需点名专业角色；ASK_USER 列出澄清问题；仅在具备当前候选稿且无阻断时建议 SUBMIT_REVIEW。后两种动作的 target_roles 留空，仅 ASK_USER 填写 questions。issue_ids 只引用已提供的问题。kind=value 的价值分歧只能 ASK_USER 交用户裁决，不能点名回应；定向补充轮与修订轮有硬上限，超限时请提交候选稿或请用户补充。任务 kind=scoring 时输出 action=\"SCORE\" 并给出 scorecard：2-8 个备选方案，每个方案对 user_value、feasibility、cost、differentiation、risk 各打 0-5 整数分（成本与风险按「可控程度」打分，越高越好），rationale 写一句采纳理由；此时 target_roles、questions、issue_ids 均留空。",
+    "host": "你是主持人。说明本轮议题与动作理由，限议题相关角色点名。DISCUSS 需点名专业角色；ASK_USER 列出澄清问题；仅在具备当前候选稿且无阻断时建议 SUBMIT_REVIEW。后两种动作的 target_roles 留空，仅 ASK_USER 填写 questions。issue_ids 只引用已提供的问题。kind=value 的价值分歧只能 ASK_USER 交用户裁决，不能点名回应；任务 kind=scoring 时输出 action=\"SCORE\" 并给出 scorecard：2-8 个备选方案，每个方案对 user_value、feasibility、cost、differentiation、risk 各打 0-5 整数分（成本与风险按「可控程度」打分，越高越好），rationale 写一句采纳理由；此时 target_roles、questions、issue_ids 均留空。",
     "product": "你是群聊产品经理。围绕用户价值、优先级、首版范围与范围外事项发言；收到点名时回应相应问题。",
     "research": "你是用户研究员。围绕用户、真实场景、痛点及依据发言，标明待验证假设、影响和验证方法。",
     "architect": "你是技术架构师。说明依赖、成本假设、技术约束、故障场景与可行取舍，并给出可检验的处理方式。",
@@ -280,14 +362,49 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
     ]
     if role in get_args(Specialist):
         instructions.append("basis 区分 user_statement、evidence、assumption。如使用 evidence 必须提供来源；仅 market 可用 not_applicable。")
-        if request.issues:
-            instructions.append("回应任务中的每个问题。若有阻断问题，在 verification 写出可执行的验证步骤和预期结果，不要声称已做过测试。")
+        if request.kind == "stance":
+            instructions.append(
+                "独立比较 candidate_options。stances 必须为每个选项提交一条 option_id、position、reason、source_seqs。"
+                "position 取 support、oppose 或 conditional；有条件赞同时在理由中写出条件。"
+            )
+        elif request.issues:
+            instructions.append(
+                "回应任务必须在 responses 数组逐条填写每个 issues 的 issue_id、treatment、verification、source_seqs。"
+                "treatment 说明如何处理，verification 写出可执行步骤与预期结果；无法验证的部分应明确说明，勿声称已做过测试。"
+            )
+    if role == "critic":
+        instructions.append(
+            "质疑输出必须包含 text、source_seqs、target_roles、verification 四个顶层字段。"
+            "source_seqs 必须是非空整数数组，对应 text 中明确指出的消息。若 divergence 是 value，"
+            "在 user_question 单独写一条用户能直接回答的业务取舍问题，控制在 200 字符内，不附分析或验证步骤。"
+            "收到缺少 source_seqs 的校验反馈时，"
+            "从当前快照选择确实被质疑的发言，并在 text 写明「消息 #编号」，同时把同一个编号填入顶层 source_seqs。"
+        )
     if role == "scribe":
+        constraint_limit = TECHNICAL_CONSTRAINTS_SCHEMA["items"]["maxLength"]
+        constraint_count = TECHNICAL_CONSTRAINTS_SCHEMA["maxItems"]
+        instructions.append(
+            f"content.technical_constraints 最多 {constraint_count} 条，每条最多 {constraint_limit} 个字符。"
+            "每条只写一个完整约束。超长时拆成各自可读的完整约束，或精简措辞并保留条件、例外和数值。"
+        )
         instructions.append(
             "source_map 的键必须与新 content.requirements 的 id 逐一对应，不能遗漏或保留旧键。"
-            "若有父稿，父稿每个不再出现在新正文的需求 ID，都必须在 requirement_changes 用 previous_id 说明。"
+            "优先使用任务内结构化判断、验证方法和候选方案立场；把反对和有条件赞同的理由保留在 disagreements。"
             "如收到上次校验诊断，按提示修正并返回完整 JSON；只引用当前任务快照中的消息。"
         )
+        if request.kind == "integration":
+            instructions.append("整合阶段输出 requirement_changes: []。需求沿革在正式成稿阶段登记。")
+        else:
+            baseline = list(request.draft.source_map) if request.draft else request.previous_requirement_ids
+            if baseline:
+                instructions.append(
+                    "可用于 previous_id 的需求 ID：" + json.dumps(baseline, ensure_ascii=False)
+                    + "。只为这些需求的删除、合并或拆分填 requirement_changes，"
+                    "每个未沿用的旧 ID 都须登记，replacement_ids 只能引用本次正文。"
+                    "新增需求和普通改写无需登记。若只提供 previous_requirement_ids，旧正文已被新输入取代，请根据当前快照重建。"
+                )
+            else:
+                instructions.append("本次没有旧需求基线，输出 requirement_changes: []。")
         instructions.append("content 必须符合此 FlowStudio Schema：" + json.dumps(SPEC_SCHEMA, ensure_ascii=False))
     if role == "reviewer":
         instructions.append(
@@ -308,6 +425,9 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
             "勿把未经用户选择的建议写成已确认事实，也勿加入自由填写选项，界面会自动提供。没有问题时用空对象。"
         )
     output_schema = OUTPUT_MODELS[role].model_json_schema()
+    if role in get_args(Specialist) and request.kind in {"response", "stance"}:
+        field = "responses" if request.kind == "response" else "stances"
+        output_schema["required"].append(field)
     if role == "reviewer" and request.issues:
         finding_schema = output_schema["$defs"]["Finding"]
         finding_schema["required"] = [field for field in finding_schema["required"] if field not in HISTORICAL_FINDING_FIELDS]
@@ -319,6 +439,8 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
 
 
 def check_host(request, output):
+    if request.kind == 'agenda' and output.action not in ('DISCUSS', 'ASK_USER'):
+        raise RoleRuleError('agenda tasks must start discussion or request clarification')
     if output.topic_id != request.topic_id:
         raise RoleRuleError("host topic_id does not match the task")
     unique(output.issue_ids, "issue_ids")
@@ -346,19 +468,22 @@ def check_host(request, output):
 
 
 def check_draft_changes(request, output):
-    previous = request.draft.source_map.keys() if request.draft else set()
+    if request.kind == "integration":
+        output.requirement_changes = []
+        return
+    previous = set(request.draft.source_map if request.draft else request.previous_requirement_ids)
     current = output.source_map.keys()
-    changed = [change.previous_id for change in output.requirement_changes]
+    changes = [change for change in output.requirement_changes if change.previous_id in previous]
+    changed = [change.previous_id for change in changes]
     unique(changed, "previous requirement IDs")
-    if set(changed) - previous or (previous - current) - set(changed):
-        missing = sorted((previous - current) - set(changed))
-        unknown = [i for i, key in enumerate(changed) if key not in previous]
-        raise RoleRuleError("requirement_changes must explain every removed ID and reference previous IDs. "
-                            f"Missing previous IDs {missing}; unknown previous_id at indices {unknown} (zero-based)")
-    for change in output.requirement_changes:
+    missing = sorted(previous - current - set(changed))
+    if missing:
+        raise RoleRuleError(f"requirement_changes must explain every removed ID. Missing previous IDs {missing}")
+    for change in changes:
         unique(change.replacement_ids, "replacement IDs")
         if set(change.replacement_ids) - current:
             raise RoleRuleError("requirement_changes references an unknown replacement requirement")
+    output.requirement_changes = changes
 
 
 def check_review(request, output, visible):
@@ -378,6 +503,11 @@ def check_review(request, output, visible):
                 raise RoleRuleError(f"findings/{index}/target_item: finding targets an unknown draft item")
             if finding.status == "closed":
                 raise RoleRuleError(f"findings/{index}/issue_id: closed findings must identify a previously tracked issue in issues")
+        elif finding.status == "closed":
+            issue = previous[finding.issue_id]
+            relevant = set(issue.source_seqs) | set(draft.source_map.get(issue.target_item, ()))
+            if relevant and not relevant.intersection(finding.source_seqs):
+                raise RoleRuleError(f"findings/{index}/source_seqs must cite evidence for the issue being closed")
     open_findings = [finding for finding in output.findings if finding.status == "open"]
     blocked = any(finding.severity == "blocking" for finding in open_findings)
     if output.verdict == "PASS" and blocked:
@@ -399,13 +529,61 @@ def _json_object(pairs):
     return result
 
 
+_MESSAGE_REFERENCE = re.compile(r"(?:消息\s*#?\s*|(?<![\w#])#)([1-9][0-9]{0,9})(?![0-9.])")
+
+
+def _restore_source_seqs(payload: dict, request: RoleRequest, visible: set[int]) -> None:
+    """Recover omitted references from the model's own output, then validate normally."""
+    def explicit_refs(value: Any) -> list[int]:
+        if not isinstance(value, str):
+            return []
+        return list(dict.fromkeys(int(match) for match in _MESSAGE_REFERENCE.findall(value)))
+
+    def structural_refs(groups) -> list[int] | None:
+        refs = []
+        for group in groups:
+            if not isinstance(group, list) or any(type(seq) is not int or seq not in visible for seq in group):
+                return None
+            refs.extend(group)
+        return list(dict.fromkeys(refs))
+
+    findings = payload.get("findings")
+    if request.role == "reviewer" and isinstance(findings, list):
+        for finding in findings:
+            if isinstance(finding, dict) and "source_seqs" not in finding:
+                refs = explicit_refs(finding.get("description"))
+                if refs:
+                    finding["source_seqs"] = refs
+
+    if "source_seqs" in payload:
+        return
+    refs = explicit_refs(payload.get("text"))
+    if refs:
+        payload["source_seqs"] = refs
+    elif request.role == "scribe" and isinstance(source_map := payload.get("source_map"), dict):
+        refs = structural_refs(source_map.values())
+        if refs:
+            payload["source_seqs"] = refs
+    elif request.role == "reviewer" and isinstance(findings, list) and all(isinstance(finding, dict) for finding in findings):
+        refs = structural_refs(finding.get("source_seqs") for finding in findings)
+        if refs is not None:
+            payload["source_seqs"] = refs
+    elif request.role == "host" or (
+        request.role in get_args(Specialist) and payload.get("basis") in ("assumption", "not_applicable")
+    ):
+        payload["source_seqs"] = []
+
+
 def validate_output(request: RoleRequest, raw: str) -> RoleOutput:
     """按固定角色解码，再核对可见消息、调度建议、草稿或冻结评审的引用。"""
     context = None
     if request.role == "reviewer":
         context = {"prior_issues": {issue.issue_id: issue for issue in request.issues}}
-    output = OUTPUT_MODELS[request.role].model_validate(json.loads(raw, object_pairs_hook=_json_object), context=context)
+    payload = json.loads(raw, object_pairs_hook=_json_object)
     visible = {message.seq for message in request.messages}
+    if isinstance(payload, dict):
+        _restore_source_seqs(payload, request, visible)
+    output = OUTPUT_MODELS[request.role].model_validate(payload, context=context)
     check_sources(output.source_seqs, visible)
     if isinstance(output, (HostOutput, CriticOutput)):
         unique(output.target_roles, "target_roles")
@@ -414,16 +592,33 @@ def validate_output(request: RoleRequest, raw: str) -> RoleOutput:
     if isinstance(output, HostOutput):
         check_host(request, output)
     elif isinstance(output, OpinionOutput):
+        if (output.responses and request.kind != "response") or (output.stances and request.kind != "stance"):
+            raise RoleRuleError("role output fields must match the assigned task kind")
         if output.basis == "not_applicable" and request.role != "market":
             raise RoleRuleError("only market may mark its assessment not_applicable")
         if output.basis == "evidence" and not output.source_seqs:
             raise RoleRuleError("evidence-based statements must cite an available source")
-        if any(issue.severity == "blocking" for issue in request.issues) and not output.verification:
+        if request.kind == "stance":
+            ids = [stance.option_id for stance in output.stances]
+            unique(ids, "stance option IDs")
+            if set(ids) != {option.option_id for option in request.candidate_options}:
+                raise RoleRuleError("stances must include exactly one entry for each candidate option")
+            for index, stance in enumerate(output.stances):
+                check_sources(stance.source_seqs, visible, f"stances/{index}/source_seqs")
+        elif request.kind == "response":
+            ids = [response.issue_id for response in output.responses]
+            unique(ids, "response issue IDs")
+            if set(ids) != {issue.issue_id for issue in request.issues}:
+                raise RoleRuleError("responses must include exactly one entry for each assigned issue_id")
+            for index, response in enumerate(output.responses):
+                check_sources(response.source_seqs, visible, f"responses/{index}/source_seqs")
+        elif any(issue.severity == "blocking" for issue in request.issues) and not output.verification:
             raise RoleRuleError("blocking responses need a verification procedure")
     elif isinstance(output, CriticOutput):
         if not output.source_seqs:
             raise RoleRuleError("critic must cite the message being challenged")
     elif isinstance(output, ScribeOutput):
+        output.content = split_technical_constraints(output.content)
         check_source_map(output.content, output.source_map, visible)
         check_draft_changes(request, output)
     elif isinstance(output, ReviewOutput):

@@ -1,4 +1,6 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
+from time import monotonic, sleep
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from backend.discussions.routes import build_service, create_app
 from backend.discussions.agent_execution import AgentExecution
+from backend.discussions.repository import LeaseLost
 from backend.roles.runner import RoleRunner
 from discussion_orchestration import SessionStatus, WaitingFor
 from backend.roles.contracts import RoleRequest
@@ -19,6 +22,22 @@ from backend.roles.simulation import SimulationProvider
 
 
 class DiscussionAgentExecutionTest(unittest.TestCase):
+    def advance_reviewed_revisions(self, client, path, *, max_returns=20):
+        state = client.get(path).json()
+        for _ in range(max_returns):
+            if state["status"] != "awaiting_confirmation" or state["active_draft"]["review_verdict"] != "revise":
+                return state
+            draft_id = state["active_draft"]["draft_id"]
+            self.assertFalse(state["pending_tasks"])
+            returned = client.post(f"{path}/actions", headers={"Idempotency-Key": str(uuid4())}, json={
+                "type": "require_changes", "payload": {"draft_id": draft_id},
+                "expected_state_version": state["state_version"],
+            })
+            self.assertTrue(returned.json()["decision"]["ok"], returned.text)
+            state = client.get(path).json()
+            self.assertNotEqual(state["active_draft"]["draft_id"], draft_id, state)
+        self.fail("模拟会话没有在预期次数内收敛")
+
     def test_invalid_integration_retries_with_diagnostic_and_resumes_same_task(self):
         complete = SimulationProvider.complete
         prompts = []
@@ -140,6 +159,8 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 challenges = [m for m in messages if m["kind"] == "challenge"]
                 self.assertEqual(len(challenges), 1)
                 self.assertEqual(challenges[0]["role"], "challenger")
+                self.assertTrue(challenges[0]["verification"])
+                self.assertTrue(all(message["basis"] for message in messages if message["kind"] == "statement"))
                 self.assertTrue(challenges[0]["source_seqs"])
                 self.assertFalse(state["open_issues"])
                 self.assertEqual({p["status"] for p in state["participants"] if p["role"] != "user"}, {"succeeded"})
@@ -179,6 +200,12 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 self.assertIsNone(resumed["clarification"])
                 original = next(message for message in answer.json()["new_messages"] if message["role"] == "user")
                 self.assertEqual(resumed["clarification_answers"][str(original["seq"])][0]["answer"], "行政人员")
+                note = client.post(f"{path}/messages", headers={"Idempotency-Key": str(uuid4())}, json={
+                    "text": "只备注这条讨论", "reply_to_seq": clarification["message_seq"],
+                    "substantive": False, "expected_state_version": resumed["state_version"],
+                })
+                self.assertTrue(note.json()["decision"]["ok"], note.text)
+                resumed = client.get(path).json()
                 revision = {
                     "text": f"1. {clarification['questions'][0]}\n回答：研发人员",
                     "reply_to_seq": clarification["message_seq"], "substantive": True,
@@ -197,6 +224,29 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                     **revision, "input_version": updated["input_version"], "expected_state_version": updated["state_version"],
                 })
                 self.assertFalse(stale.json().get("decision", {}).get("ok", False), stale.text)
+
+    def test_identical_pending_agent_task_stops_without_repeating_provider_call(self):
+        complete = SimulationProvider.complete
+        calls = []
+
+        async def track_call(provider, request, messages):
+            calls.append(request.logical_task_id)
+            return await complete(provider, request, messages)
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(SimulationProvider, "complete", track_call), \
+                patch.object(AgentExecution, "_apply", return_value=False):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "Book a room",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                self.assertEqual(created.status_code, 201, created.text)
+                state = client.get(f"/api/v1/discussions/{created.json()['id']}").json()
+                self.assertEqual(state["waiting_for"], "host_agenda")
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(state["participants"][0]["error_code"], "AGENT_NO_PROGRESS")
+                self.assertEqual(service.repo.pending_runs("simulation"), [])
 
     def test_retry_runs_only_unfinished_tasks(self):
         complete = SimulationProvider.complete
@@ -233,6 +283,7 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
             if request.role == "critic":
                 output = json.loads(response.content)
                 output["divergence"] = "value"
+                output["user_question"] = "首版优先开放全部预约时段，还是限制高峰时段？"
                 return Completion(json.dumps(output), response.usage)
             return response
 
@@ -250,14 +301,18 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 self.assertEqual(state["waiting_for"], "user_input")
                 self.assertTrue(state["clarification"]["questions"])
                 self.assertTrue(any(issue.get("kind") == "value" for issue in state["open_issues"]))
+                self.assertEqual(state["clarification"]["questions"], ["首版优先开放全部预约时段，还是限制高峰时段？"])
                 # 价值分歧不派发点名回应：没有 response 消息，也不进入定向补充轮。
                 messages = client.get(f"/api/v1/discussions/{created.json()['id']}/messages").json()["items"]
                 self.assertFalse([m for m in messages if m["kind"] == "response"])
 
     def test_tradeoff_divergence_triggers_scoring_before_draft(self):
         complete = SimulationProvider.complete
+        scoring_requests = []
 
         async def tradeoff_critic(provider, request, messages):
+            if request.kind == "scoring":
+                scoring_requests.append(request)
             response = await complete(provider, request, messages)
             if request.role == "critic":
                 output = json.loads(response.content)
@@ -274,14 +329,36 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 }, headers={"Idempotency-Key": str(uuid4())})
                 self.assertEqual(created.status_code, 201, created.text)
                 session_id = created.json()["id"]
-                state = client.get(f"/api/v1/discussions/{session_id}").json()
+                state = self.advance_reviewed_revisions(client, f"/api/v1/discussions/{session_id}")
 
                 self.assertEqual(state["status"], "awaiting_confirmation", state)
                 self.assertIsNotNone(state["scorecard"], state)
                 self.assertEqual(state["scorecard"]["chosen_option_id"], "A")
+                self.assertEqual(set(state["scorecard"]["stances"]), {"product", "research", "architect", "designer", "business"})
+                self.assertTrue(all(
+                    {position["option_id"] for position in stances} == {"A", "B"}
+                    for stances in state["scorecard"]["stances"].values()
+                ))
                 self.assertEqual([option["option_id"] for option in state["scorecard"]["options"]], ["A", "B"])
                 self.assertEqual(state["active_draft"]["chosen_option_id"], "A")
                 self.assertEqual(state["active_draft"]["scorecard_id"], state["scorecard"]["scorecard_id"])
+                first = state["drafts"][0]
+                history = client.get(f"/api/v1/discussions/{session_id}/drafts/{first['draft_id']}")
+                self.assertEqual(history.status_code, 200, history.text)
+                historical = history.json()
+                self.assertTrue(historical["content"]["requirements"])
+                self.assertEqual(historical["review_verdict"], "revise")
+                self.assertEqual(historical["scorecard_id"], historical["scorecard"]["scorecard_id"])
+                self.assertNotEqual(historical["scorecard_id"], state["active_draft"]["scorecard_id"])
+                self.assertTrue(historical["scorecard"]["stances"])
+                self.assertEqual(state["active_draft"]["parent_id"], first["draft_id"])
+
+                self.assertGreaterEqual(len(scoring_requests), 2)
+                self.assertNotEqual(scoring_requests[0].issues[0].issue_id, scoring_requests[-1].issues[0].issue_id)
+                for request in scoring_requests:
+                    self.assertEqual([issue.kind for issue in request.issues], ["tradeoff"])
+                    self.assertTrue(request.issues[0].source_seqs)
+
 
                 confirmed = client.post(f"/api/v1/discussions/{session_id}/confirm", json={
                     "draft_id": state["active_draft"]["draft_id"],
@@ -295,12 +372,122 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 self.assertNotIn("scorecard_id", exported)
                 self.assertNotIn("chosen_option_id", exported)
 
+    def test_workers_claim_once_and_stale_worker_cannot_write(self):
+        with TemporaryDirectory() as directory:
+            db = Path(directory) / "discussion.sqlite3"
+            first, second = build_service(db), build_service(db)
+            first.agent_mode = second.agent_mode = "simulation"
+            _, initial = first.create(str(uuid4()), "Book a room")
+            sid = initial["id"]
+            with patch("backend.discussions.repository.time", return_value=100), ThreadPoolExecutor(2) as pool:
+                contenders = ("first", "second")
+                claims = list(pool.map(lambda pair: pair[0].repo.claim_run(sid, "simulation", pair[1], 5),
+                                       zip((first, second), contenders)))
+                self.assertCountEqual(claims, [1, None])
+                owner = contenders[claims.index(1)]
+                self.assertEqual(first.repo.pending_runs("real"), [])
+                self.assertEqual(first.repo.pending_runs("simulation"), [])
+            with patch("backend.discussions.repository.time", return_value=106):
+                self.assertEqual(second.repo.claim_run(sid, "simulation", "replacement", 5), 1)
+                session, meta = first.repo.load_state(sid)
+                with self.assertRaises(LeaseLost):
+                    first.repo.save_after_decision(session, meta["state_version"], lease_owner=owner)
+                first.repo.release_run(sid, owner, 1, finished=True)
+                second.repo.renew_run(sid, "replacement", 5)
+                second.act(sid, action="run_agents", payload={}, expected_state_version=meta["state_version"],
+                           idempotency_key=None, request_hash="", scope="")
+                second.repo.release_run(sid, "replacement", 1, finished=True)
+                self.assertEqual(second.repo.pending_runs("simulation"), [sid])
+
+    def test_concurrent_idempotent_create_enqueues_one_session(self):
+        with TemporaryDirectory() as directory:
+            db = Path(directory) / "discussion.sqlite3"
+            services = (build_service(db), build_service(db))
+
+            def create(service):
+                service.agent_mode = "simulation"
+                return service.create("project", "Book a room", idempotency_key="same-key",
+                                      request_hash="same-request", scope="create")
+
+            with ThreadPoolExecutor(2) as pool:
+                results = list(pool.map(create, services))
+            self.assertEqual(results[0], results[1])
+            self.assertEqual(services[0].repo.pending_runs("simulation"), [results[0][1]["id"]])
+
+    def test_server_start_resumes_persisted_execution_without_browser_action(self):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}):
+            db = Path(directory) / "discussion.sqlite3"
+            before_restart = build_service(db)
+            before_restart.agent_mode = "simulation"
+            _, initial = before_restart.create(str(uuid4()), "名称：会议室预约。用户：行政人员。目标：预约会议室。")
+            sid = initial["id"]
+            with patch("backend.discussions.repository.time", return_value=100):
+                self.assertEqual(before_restart.repo.claim_run(sid, "simulation", "stopped-worker", 1), 1)
+                before_restart.repo.record_attempt(
+                    session_id=sid, logical_task_id=f"{sid}:agent:agenda:v1", attempt_no=1, role="host",
+                    task_kind="agenda", snapshot_ref="snap-v1", input_version=1, status="RUNNING",
+                    lease_owner="stopped-worker",
+                )
+            resumed = build_service(db)
+            self.assertEqual(resumed.repo.list_attempts(sid)[0]["status"], "RUNNING")
+            with TestClient(create_app(resumed, with_agents=True)) as client:
+                path = f"/api/v1/discussions/{sid}"
+                deadline = monotonic() + 8
+                while monotonic() < deadline:
+                    state = client.get(path).json()
+                    if state["status"] == "awaiting_confirmation":
+                        break
+                    sleep(0.05)
+                self.assertEqual(state["status"], "awaiting_confirmation", state)
+                self.assertEqual(state["active_draft"]["review_verdict"], "revise")
+                self.assertFalse(state["pending_tasks"])
+                # Show that the background recovery also stopped at the human gate.
+                self.assertEqual(client.get(path).json()["last_seq"], state["last_seq"])
+                attempts = resumed.repo.list_attempts(sid)
+                host = [a for a in attempts if a["role"] == "host"]
+                self.assertEqual([a["status"] for a in host], ["FAILED", "SUCCEEDED"])
+                self.assertEqual(host[0]["error"]["code"], "PROCESS_INTERRUPTED")
+                self.assertEqual(state["usage"]["calls"], len(attempts) - 1)
+                self.assertGreater(state["usage"]["elapsed_seconds"], 0)
+                self.assertGreater(state["usage"]["by_task"]["review"]["calls"], 0)
+                self.assertEqual(resumed.repo.pending_runs("simulation"), [])
+
+    def test_fixed_ideas_preserve_user_scope_and_improve_acceptance_criteria(self):
+        cases = [
+            ("会议室预约", "行政人员", "预约不得重叠", "首版仅覆盖总部", "只生成一个有效结果"),
+            ("补货申请", "库房员工", "提交缺货申请", "仅支持内部试用", "返回结果与用例中的预期值一致"),
+        ]
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}):
+            service = build_service(Path(directory) / "quality.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                for name, audience, goal, scope, observable in cases:
+                    with self.subTest(case=name):
+                        created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                            "idea": f"名称：{name}。用户：{audience}。目标：{goal}。约束：{scope}。",
+                        }, headers={"Idempotency-Key": str(uuid4())})
+                        self.assertEqual(created.status_code, 201, created.text)
+                        sid = created.json()["id"]
+                        state = self.advance_reviewed_revisions(client, f"/api/v1/discussions/{sid}")
+                        self.assertEqual(state["status"], "awaiting_confirmation", state)
+                        session, _ = service.repo.load_state(sid)
+                        before = session.drafts[0].content["requirements"][0]
+                        final = session.current_draft.content
+                        after, = final["requirements"]
+                        self.assertEqual(final["target_users"], [audience])
+                        self.assertEqual(final["development_constraints"], [scope])
+                        self.assertEqual(final["technical_constraints"], [])
+                        self.assertEqual((after["id"], after["text"]), (before["id"], goal))
+                        self.assertFalse(any(observable in criterion for criterion in before["acceptance_criteria"]))
+                        self.assertTrue(any(observable in criterion for criterion in after["acceptance_criteria"]))
+                        self.assertTrue(after["source_seqs"])
+
     def test_revisions_switch_bounded_execution_batches_automatically(self):
         complete = SimulationProvider.complete
         runners = []
+        review_requests = []
 
         def track_runner(*args, **kwargs):
-            runner = RoleRunner(*args, **kwargs)
+            runner = RoleRunner(*args, **kwargs, call_limit=4)
             runners.append(runner)
             return runner
 
@@ -308,17 +495,19 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
             response = await complete(provider, request, messages)
             output = json.loads(response.content)
             if request.role == "scribe" and request.draft:
-                output["content"]["product_name"] = f"会议室预约 v{request.draft.revision + 1}"
+                output["content"]["requirements"][0]["acceptance_criteria"].append(
+                    f"并发上限为 {request.draft.revision + 1} 时，返回明确的受理结果。"
+                )
+            if request.role == "reviewer":
+                review_requests.append(request)
             if request.role == "reviewer" and request.draft.revision < 18:
                 output["verdict"] = "REVISE"
                 for finding in output["findings"]:
                     finding["status"] = "open"
             return Completion(json.dumps(output), response.usage)
 
-        # 本用例验证「调用预算用尽后自动换批」，需要 18 个版本，故放宽修订硬上限。
-        with TemporaryDirectory() as directory, patch.dict(os.environ, {
-            "DISCUSSION_AGENT_MODE": "simulation", "DISCUSSION_MAX_REVISION_ROUNDS": "30",
-        }), patch.object(SimulationProvider, "complete", extended_revision), \
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(SimulationProvider, "complete", extended_revision), \
                 patch("backend.discussions.agent_execution.RoleRunner", side_effect=track_runner):
             service = build_service(Path(directory) / "discussion.sqlite3")
             with TestClient(create_app(service, with_agents=True)) as client:
@@ -327,15 +516,22 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 }, headers={"Idempotency-Key": str(uuid4())})
                 self.assertEqual(created.status_code, 201, created.text)
                 session_id = created.json()["id"]
-                state = client.get(f"/api/v1/discussions/{session_id}").json()
+                state = self.advance_reviewed_revisions(client, f"/api/v1/discussions/{session_id}")
                 self.assertEqual(state["status"], "awaiting_confirmation", state)
                 self.assertEqual(state["active_draft"]["version"], 18)
                 session, _ = service.repo.load_state(session_id)
                 self.assertGreater(session.dispatch_units, 64)
+                final_review = review_requests[-1]
+                visible = {message.seq for message in final_review.messages}
+                self.assertLess(len(visible), len(session.messages))
+                self.assertTrue(all(seq in visible for seqs in final_review.draft.source_map.values() for seq in seqs))
+                self.assertTrue(all(seq in visible for issue in final_review.issues for seq in issue.source_seqs))
+                self.assertNotIn(next(message.seq for message in session.messages if message.kind.value == "agenda"), visible)
                 self.assertGreater(len(runners), 1)
                 attempts = service.repo.list_attempts(session_id)
                 self.assertEqual(sum(runner.calls_used for runner in runners), len(attempts))
-                self.assertTrue(all(0 < runner.calls_used <= 32 for runner in runners))
+                self.assertGreater(len(runners), state["active_draft"]["version"])
+                self.assertTrue(all(0 < runner.calls_used <= 4 for runner in runners))
                 self.assertTrue(all(attempt["status"] == "SUCCEEDED" for attempt in attempts))
                 self.assertEqual(len({attempt["logical_task_id"] for attempt in attempts}), len(attempts))
 
@@ -360,7 +556,7 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                     "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。",
                 }, headers={"Idempotency-Key": str(uuid4())})
                 self.assertEqual(created.status_code, 201, created.text)
-                state = client.get(f"/api/v1/discussions/{created.json()['id']}").json()
+                state = self.advance_reviewed_revisions(client, f"/api/v1/discussions/{created.json()['id']}")
                 self.assertEqual(state["status"], "clarifying", state)
                 self.assertEqual(state["waiting_for"], "user_input")
                 self.assertEqual(state["active_draft"]["version"], 3)
@@ -394,7 +590,7 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                     "type": "resume", "expected_state_version": saved["state_version"],
                 })
                 self.assertTrue(resumed.json()["decision"]["ok"], resumed.text)
-                state = client.get(path).json()
+                state = self.advance_reviewed_revisions(client, path)
                 self.assertEqual(state["status"], "awaiting_confirmation", state)
                 self.assertEqual(state["active_draft"]["version"], 2)
 
@@ -437,7 +633,17 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 }, headers=headers())
                 self.assertEqual(creation.status_code, 201, creation.text)
                 path = f"/api/v1/discussions/{creation.json()['id']}"
-                state = client.get(path).json()
+                initial = client.get(path).json()
+                self.assertEqual(initial["status"], "awaiting_confirmation", initial)
+                self.assertEqual(initial["active_draft"]["review_verdict"], "revise")
+                self.assertFalse(initial["pending_tasks"])
+                stale = client.post(f"{path}/actions", headers=headers(), json={
+                    "type": "require_changes", "payload": {"draft_id": "previous-draft"},
+                    "expected_state_version": initial["state_version"],
+                })
+                self.assertEqual(stale.status_code, 409, stale.text)
+                self.assertEqual(client.get(path).json()["state_version"], initial["state_version"])
+                state = self.advance_reviewed_revisions(client, path)
                 self.assertEqual(state["status"], "awaiting_confirmation", state)
                 self.assertEqual([review["verdict"] for review in state["reviews"]], ["revise", "pass"])
                 self.assertEqual(calls.count("reviewer"), 3)

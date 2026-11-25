@@ -32,6 +32,14 @@ class SignedSpecExportTests(unittest.TestCase):
         self.path = f"/api/v1/discussions/{self.sid}"
         state = self.workbench.get(self.path).json()
         self.assertEqual(state["status"], "awaiting_confirmation")
+        if state["active_draft"]["review_verdict"] == "revise":
+            returned = self.embedded.post(self.path + "/actions", headers={"Idempotency-Key": str(uuid4())}, json={
+                "type": "require_changes", "payload": {"draft_id": state["active_draft"]["draft_id"]},
+                "expected_state_version": state["state_version"],
+            })
+            self.assertTrue(returned.json()["decision"]["ok"], returned.text)
+            state = self.workbench.get(self.path).json()
+        self.assertEqual(state["active_draft"]["review_verdict"], "pass")
         self.confirm = {"draft_id": state["active_draft"]["draft_id"], "input_version": state["input_version"],
                         "expected_state_version": state["state_version"]}
         self.headers = {"Idempotency-Key": str(uuid4())}
@@ -92,7 +100,7 @@ class SignedSpecExportTests(unittest.TestCase):
         self.assertEqual(self.workbench.get(self.path + "/export").status_code, 409)
         result = self.workbench.post(self.path + "/confirm", json=self.confirm, headers=self.headers)
         self.assertTrue(result.json()["decision"]["ok"])
-        self.assertEqual(result.json()["handoff"]["export_url"], self.path + "/export")
+        self.assertEqual(result.json()["handoff"]["export_url"], self.path + f"/export?draft_id={self.confirm['draft_id']}")
         self.assert_download()
 
     def test_previous_signoff_and_replayed_receipt_can_download(self):
@@ -102,4 +110,45 @@ class SignedSpecExportTests(unittest.TestCase):
         self.assert_download()
         replay = self.workbench.post(self.path + "/confirm", json=self.confirm, headers=self.headers)
         self.assertEqual(replay.json()["handoff"]["confirmed_at"], old.json()["handoff"]["confirmed_at"])
-        self.assertEqual(replay.json()["handoff"]["export_url"], self.path + "/export")
+        self.assertEqual(replay.json()["handoff"]["export_url"], self.path + f"/export?draft_id={self.confirm['draft_id']}")
+
+
+    def test_sign_revise_reopen_and_keep_both_signed_downloads(self):
+        created = self.embedded.post(
+            f"/api/v1/projects/{uuid4()}/discussions",
+            json={"idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。"},
+            headers={"Idempotency-Key": str(uuid4())},
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        path = f"/api/v1/discussions/{created.json()['id']}"
+        first = self.workbench.get(path).json()
+        self.assertEqual(first["active_draft"]["review_verdict"], "revise")
+        old_id = first["active_draft"]["draft_id"]
+        first_body = {"draft_id": old_id, "input_version": first["input_version"],
+                      "expected_state_version": first["state_version"]}
+        first_headers = {"Idempotency-Key": str(uuid4())}
+        signed = self.workbench.post(path + "/confirm", json=first_body, headers=first_headers).json()
+        self.assertTrue(signed["decision"]["ok"], signed)
+        self.assertEqual(signed["handoff"]["review_verdict"], "revise")
+        self.assertTrue(signed["session"]["drafts"][0]["signed"])
+        old_url = signed["handoff"]["export_url"]
+        old_file = self.workbench.get(old_url)
+        self.assertEqual(old_file.status_code, 200)
+        reopened = self.embedded.post(path + "/actions", headers={"Idempotency-Key": str(uuid4())}, json={
+            "type": "require_changes", "payload": {"draft_id": old_id},
+            "expected_state_version": signed["session"]["state_version"],
+        })
+        self.assertTrue(reopened.json()["decision"]["ok"], reopened.text)
+        second = self.workbench.get(path).json()
+        self.assertEqual(second["active_draft"]["review_verdict"], "pass")
+        self.assertEqual(self.workbench.get(path + "/export").content, old_file.content)
+        latest = self.workbench.post(path + "/confirm", headers={"Idempotency-Key": str(uuid4())}, json={
+            "draft_id": second["active_draft"]["draft_id"], "input_version": second["input_version"],
+            "expected_state_version": second["state_version"],
+        }).json()
+        self.assertTrue(latest["decision"]["ok"], latest)
+        self.assertEqual(sum(draft["signed"] for draft in latest["session"]["drafts"]), 2)
+        self.assertNotEqual(latest["handoff"]["content_hash"], signed["handoff"]["content_hash"])
+        replay = self.workbench.post(path + "/confirm", json=first_body, headers=first_headers).json()
+        self.assertEqual(replay["handoff"]["export_url"], old_url)
+        self.assertEqual(self.workbench.get(old_url).content, old_file.content)

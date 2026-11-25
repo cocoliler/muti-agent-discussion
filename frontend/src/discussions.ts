@@ -4,6 +4,7 @@ export type Message = {
   seq: number;
   role: string;
   kind: string;
+  substantive?: boolean;
   text: string;
   reply_to_seq: number | null;
   source_seqs: number[];
@@ -22,6 +23,7 @@ export type Requirement = {
 };
 
 export type DraftVersion = {
+  signed?: boolean;
   draft_id: string;
   version: number;
   input_version: number;
@@ -34,7 +36,11 @@ export type Draft = DraftVersion & {
   agreements?: string[];
   alternatives?: string[];
   disagreements?: string[];
+  assumptions?: string[];
+  risks?: string[];
   scorecard_id?: string | null;
+  parent_id?: string | null;
+  scorecard?: Scorecard | null;
   chosen_option_id?: string | null;
 };
 
@@ -54,10 +60,22 @@ export type Scorecard = {
   rationale: string;
   weights: Record<string, number>;
   options: ScoredOption[];
+  stances?: Record<string, { option_id: string; position: string; reason: string; source_seqs: number[] }[]>;
 };
 
 export type Finding = { code?: string; path?: string; message?: string; finding_id?: string;
   target_item?: string; summary?: string; severity?: string; close_condition?: string; responsible_role?: string };
+
+export type LocalDiscussion = {
+  id: string;
+  project_id: string;
+  title: string;
+  status: string;
+  round_no: number;
+  updated_at: string;
+};
+
+export type LocalDiscussionPage = { items: LocalDiscussion[]; next_cursor: string | null };
 
 export type Session = {
   export_url?: string | null;
@@ -120,10 +138,10 @@ export class ApiError extends Error {
 
 export const discussionPath = (id: string) => `/discussions/${encodeURIComponent(id)}`;
 
-export async function api<T>(path: string, body?: object, key?: string, signal?: AbortSignal): Promise<T> {
+export async function api<T>(path: string, body?: object, key?: string, signal?: AbortSignal, method?: 'DELETE'): Promise<T> {
   const timeout = AbortSignal.timeout(10000);
   const response = await fetch(`/api/v1${path}`, {
-    method: body === undefined ? 'GET' : 'POST',
+    method: method ?? (body === undefined ? 'GET' : 'POST'),
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json', 'Idempotency-Key': key! },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
@@ -139,6 +157,10 @@ export async function api<T>(path: string, body?: object, key?: string, signal?:
   }
   if (result === null) throw new Error('讨论服务返回了无效响应。');
   return result as T;
+}
+
+export function deleteDiscussion(id: string): Promise<{ deleted: boolean }> {
+  return api(discussionPath(id), undefined, undefined, undefined, 'DELETE');
 }
 
 export async function readMessages(id: string, after: number, signal: AbortSignal): Promise<Message[]> {

@@ -1,4 +1,5 @@
 import { useId, useRef, useState } from 'react';
+import { formatInlineText } from './DiscussionMessageText';
 import type { ClarificationAnswer } from './discussions';
 
 function suggestedAnswers(question: string) {
@@ -63,7 +64,7 @@ export function ClarificationForm({ questions, options, busy, error, initialAnsw
           const current = answers[index];
           const group = `${titleId}-answer-${index}`;
           return <fieldset className="clarification-options" key={index} disabled={busy}>
-            <legend>{prompts.length > 1 && `${index + 1}. `}{question}</legend>
+            <legend>{prompts.length > 1 && `${index + 1}. `}{formatInlineText(question)}</legend>
             {suggestions[index].map((suggestion, optionIndex) => <label className="clarification-option" key={suggestion}>
               <input type="radio" name={group} checked={current.choice === suggestion}
                 onChange={() => updateAnswer(index, { choice: suggestion })} />

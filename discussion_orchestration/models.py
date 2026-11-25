@@ -11,8 +11,6 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from .enums import (
-    MAX_DIRECTED_ROUNDS,
-    MAX_REVISION_ROUNDS,
     PROFESSIONAL_ROLES,
     DivergenceKind,
     ScoreDimension,
@@ -95,6 +93,22 @@ class Message:
     clarification_questions: tuple[str, ...] = ()
     clarification_answers: tuple[ClarificationAnswer, ...] = ()
     replaces_answer_seq: int | None = None
+    substantive: bool = True
+    basis: str | None = None
+    verification: str | None = None
+    agreements: tuple[str, ...] = ()
+    alternatives: tuple[str, ...] = ()
+    disagreements: tuple[str, ...] = ()
+    assumptions: tuple[str, ...] = ()
+    risks: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class IssueResponse:
+    issue_id: str
+    treatment: str
+    verification: str
+    source_seqs: tuple[int, ...] = ()
 
 
 @dataclass
@@ -111,8 +125,11 @@ class Issue:
     source_seqs: tuple[int, ...] = ()
     assignee: Role | None = None
     needs_user: bool = False
+    user_question: str | None = None
     status: IssueStatus = IssueStatus.OPEN
     closed_by_seq: int | None = None
+    response: IssueResponse | None = None
+    response_seq: int | None = None
     #: 问题所属的输入版本。输入版本升级后旧问题保留历史，但不再计入当前成稿门禁。
     input_version: int = 1
 
@@ -127,6 +144,14 @@ class OptionScore:
 
 
 @dataclass(frozen=True)
+class OptionStance:
+    option_id: str
+    position: str
+    reason: str
+    source_seqs: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class Scorecard:
     """收敛评分卡。权重与排名由编排层计算，模型只提供各维度原始分。"""
 
@@ -138,6 +163,7 @@ class Scorecard:
     weights: Mapping[ScoreDimension, float] = field(default_factory=dict)
     rationale: str = ""
     chosen_option_id: str = ""
+    stances: dict[Role, tuple[OptionStance, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -176,6 +202,10 @@ class SpeakerOutput:
     issue_ids: tuple[str, ...] = ()
     raised_issues: tuple[Issue, ...] = ()
     evidence: tuple[str, ...] = ()
+    basis: str | None = None
+    verification: str | None = None
+    responses: tuple[IssueResponse, ...] = ()
+    stances: tuple[OptionStance, ...] = ()
     not_applicable: str | None = None
     draft_content: Mapping[str, Any] | None = None
     item_refs: tuple[str, ...] = ()
@@ -183,6 +213,8 @@ class SpeakerOutput:
     agreements: tuple[str, ...] = ()
     alternatives: tuple[str, ...] = ()
     disagreements: tuple[str, ...] = ()
+    assumptions: tuple[str, ...] = ()
+    risks: tuple[str, ...] = ()
     #: 评分任务的结果；其他任务为空。
     scorecard: Scorecard | None = None
 
@@ -213,6 +245,7 @@ class ReviewResult:
     findings: tuple[ReviewFinding, ...] = ()
     questions: tuple[str, ...] = ()
     question_options: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    verified_findings: tuple[ReviewFinding, ...] = ()
 
 
 @dataclass
@@ -232,6 +265,8 @@ class DraftRevision:
     agreements: tuple[str, ...] = ()
     alternatives: tuple[str, ...] = ()
     disagreements: tuple[str, ...] = ()
+    assumptions: tuple[str, ...] = ()
+    risks: tuple[str, ...] = ()
     #: 本版本依据的评分卡与被采纳的方案，用于追溯「为什么这么定」。
     scorecard_id: str | None = None
     chosen_option_id: str | None = None
@@ -307,9 +342,9 @@ class DiscussionSession:
     failures: dict[str, list[str]] = field(default_factory=dict)
     directed_rounds: int = 0
     revision_rounds: int = 0
-    #: 硬性轮次上限：防止「评审不断换措辞提新问题」导致无限循环。
-    max_directed_rounds: int = MAX_DIRECTED_ROUNDS
-    max_revision_rounds: int = MAX_REVISION_ROUNDS
+    #: 可选的单个输入版本内的轮次保护。
+    max_directed_rounds: int | None = None
+    max_revision_rounds: int | None = None
     dispatch_units: int = 0
     round_challenged: bool = False
     paused_from: SessionStatus | None = None

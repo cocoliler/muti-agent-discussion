@@ -52,6 +52,20 @@ class RoleContractTests(unittest.TestCase):
             self.assertEqual(snapshot["messages"][0]["seq"], 7)
         self.assertEqual(len(prompts), 9)
 
+    def test_mismatched_role_task_and_unassigned_evidence_are_rejected(self):
+        for role in OUTPUT_MODELS:
+            with self.subTest(role=role), self.assertRaisesRegex(ValueError, "task kind"):
+                task(role, kind="unknown")
+        with self.assertRaisesRegex(ValueError, "assigned to the responding role"):
+            task("research", kind="response", issues=[issue()])
+        with self.assertRaisesRegex(ValueError, "two and eight"):
+            task("architect", kind="stance", candidate_options=[{"option_id": "A", "title": "方案 A"}])
+        with self.assertRaisesRegex(RoleRuleError, "fields must match"):
+            self.check(task("architect", kind="statement"), {
+                "text": "方案比较", "basis": "assumption", "source_seqs": [],
+                "stances": [{"option_id": "A", "position": "conditional", "reason": "需验证"}],
+            })
+
     def test_request_rejects_cross_session_future_or_ambiguous_sources(self):
         for messages in ([message(session_id="other")], [message(input_version=3)], [message(), message()]):
             with self.subTest(messages=messages), self.assertRaises(ValueError):
@@ -93,6 +107,61 @@ class RoleContractTests(unittest.TestCase):
                         dict(source_map={}), dict(source_map={"FR-01": [7], "FR-02": [12]})):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.check(req, dict(base, **changes))
+
+    def test_missing_source_field_recovers_only_from_role_appropriate_evidence(self):
+        for role in ("product", "research", "architect", "designer", "market"):
+            with self.subTest(role=role):
+                opinion = {"text": "待验证的假设。", "basis": "assumption"}
+                self.assertEqual(self.check(task(role), opinion).source_seqs, [])
+                with self.assertRaises(ValueError):
+                    self.check(task(role), {**opinion, "basis": "evidence"})
+                self.assertEqual(self.check(task(role), {"text": "依据消息 #7。", "basis": "evidence"}).source_seqs, [7])
+
+        host = dict(text="需要确认范围。", action="ASK_USER", topic_id="booking",
+                    target_roles=[], issue_ids=[], questions=["首版范围是什么？"])
+        self.assertEqual(self.check(task("host"), host).source_seqs, [])
+        critic = dict(text="针对消息 7，如何验证？", target_roles=["architect"], verification="并发测试")
+        self.assertEqual(self.check(task("critic"), critic).source_seqs, [7])
+        for text in ("第 7 轮需要验证。", "针对消息 7 和消息 99。"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                self.check(task("critic"), {**critic, "text": text})
+        for explicit in ([], [99], ["7"]):
+            with self.subTest(explicit=explicit), self.assertRaises(ValueError):
+                self.check(task("critic"), {**critic, "source_seqs": explicit})
+
+        scribe = dict(text="规格整理完毕。", content=SPEC, source_map=frozen()["source_map"],
+                      agreements=[], alternatives=[], disagreements=[], assumptions=[], risks=[])
+        self.assertEqual(self.check(task("scribe"), scribe).source_seqs, [7])
+        finding = dict(issue(), description="依据消息 #7，仍需验证。", status="open")
+        evaluation = review(verdict="REVISE", findings=[finding])
+        evaluation.pop("source_seqs")
+        req = task("reviewer", draft=frozen())
+        validated = self.check(req, evaluation)
+        self.assertEqual(validated.source_seqs, [7])
+        self.assertEqual(validated.findings[0].source_seqs, [7])
+        with self.assertRaises(ValueError):
+            self.check(req, {**evaluation, "findings": [{**finding, "description": "仍需验证。"}]})
+
+    def test_scribe_preserves_long_technical_constraints_split_at_sentence_boundaries(self):
+        first = "允许已验证的内部客户端访问受控接口，访问记录需保存供管理员复核。" * 2
+        second = " 客户端缓存仅保留非敏感字段，且每次重新登录后清除上一会话的数据。" * 2
+        combined = first + second
+        req = task("scribe")
+        base = dict(text="生成规格。", source_seqs=[7], source_map=frozen()["source_map"],
+                    agreements=[], alternatives=[], disagreements=[], assumptions=[], risks=[])
+        self.assertIn("每条最多 120 个字符", build_messages(req)[0]["content"])
+        result = self.check(req, dict(base, content=dict(SPEC, technical_constraints=["启用访问审计。", combined])))
+        parts = result.content["technical_constraints"]
+        self.assertEqual(parts[0], "启用访问审计。")
+        self.assertEqual("".join(parts[1:]), combined)
+        self.assertTrue(all(len(part) <= 120 for part in parts))
+
+        for constraints in (["甲" * 121], ["启用访问审计。"] * 29 + [combined]):
+            with self.subTest(size=len(constraints)), self.assertRaisesRegex(
+                RoleRuleError, r"technical_constraints.*maxLength \(actual \d+, limit 120\)",
+            ) as failure:
+                self.check(req, dict(base, content=dict(SPEC, technical_constraints=constraints)))
+            self.assertNotIn("甲", str(failure.exception))
 
     def test_review_requires_frozen_current_draft_and_reconciles_previous_findings(self):
         for draft in (None, dict(frozen(), input_version=1), dict(frozen(), session_id="other"),
@@ -151,6 +220,34 @@ class RoleContractTests(unittest.TestCase):
         self.check(req, dict(output, requirement_changes=changes))
         with self.assertRaises(ValueError):
             task("host", draft=parent)
+
+    def test_scribe_filters_orphan_changes_but_requires_real_removals(self):
+        base = dict(text="整合规格。", source_seqs=[7], agreements=[], alternatives=[], disagreements=[], assumptions=[], risks=[])
+        orphan = dict(previous_id="FR-99", replacement_ids=["FR-01"], reason="误引用了更早的草稿。")
+        with_parent = {**base, "content": SPEC, "source_map": frozen()["source_map"], "requirement_changes": [orphan]}
+        self.assertEqual(self.check(task("scribe", kind="integration", draft=frozen()), with_parent).requirement_changes, [])
+        self.assertEqual(self.check(task("scribe", kind="draft", draft=frozen()), with_parent).requirement_changes, [])
+        rebuilt = task("scribe", kind="draft", previous_requirement_ids=["FR-01", "FR-02"])
+        self.assertIsNone(rebuilt.draft)
+        self.assertIn('["FR-01", "FR-02"]', build_messages(rebuilt)[0]["content"])
+        trimmed = {**with_parent, "content": dict(SPEC, requirements=SPEC["requirements"][:1]), "source_map": {"FR-01": [7]}}
+        self.assertEqual(self.check(task("scribe", kind="integration"), trimmed).requirement_changes, [])
+        with self.assertRaisesRegex(RoleRuleError, "Missing previous IDs .*FR-02"):
+            self.check(rebuilt, trimmed)
+        actual = dict(previous_id="FR-02", replacement_ids=["FR-01"], reason="已合并到首条需求。")
+        self.assertEqual([item.previous_id for item in self.check(
+            rebuilt, {**trimmed, "requirement_changes": [orphan, actual]},
+        ).requirement_changes], ["FR-02"])
+        with self.assertRaisesRegex(RoleRuleError, "unknown replacement requirement"):
+            self.check(rebuilt, {**trimmed, "requirement_changes": [{**actual, "replacement_ids": ["FR-99"]}]})
+
+    def test_review_cannot_close_a_finding_with_an_unrelated_visible_reference(self):
+        prior = {**issue(), "source_seqs": [7]}
+        req = task("reviewer", draft=frozen(), issues=[prior], messages=[message(7), message(8)])
+        closed = {**issue(), "description": "已经核对。", "status": "closed", "source_seqs": [8]}
+        with self.assertRaisesRegex(RoleRuleError, "evidence for the issue being closed"):
+            self.check(req, review(findings=[closed]))
+        self.check(req, review(findings=[{**closed, "source_seqs": [7]}]))
 
     def test_nonpassing_review_with_a_new_issue_can_be_revised_or_sent_to_user(self):
         req = task("reviewer", draft=frozen())

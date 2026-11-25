@@ -38,7 +38,10 @@ PROJECT_ID = str(uuid.uuid4())
 
 EXPECTED_ROUTES = {
     ("POST", "/api/v1/projects/{project_id}/discussions"),
+    ("GET", "/api/v1/discussions"),
     ("GET", "/api/v1/discussions/{session_id}"),
+    ("DELETE", "/api/v1/discussions/{session_id}"),
+    ("GET", "/api/v1/discussions/{session_id}/drafts/{draft_id}"),
     ("GET", "/api/v1/discussions/{session_id}/messages"),
     ("POST", "/api/v1/discussions/{session_id}/messages"),
     ("POST", "/api/v1/discussions/{session_id}/actions"),
@@ -142,6 +145,39 @@ class AcceptanceTest(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 422, response.text)
         self.assertEqual(self.view(body["id"])["state_version"], body["state_version"])
+
+    def test_local_discussion_history_pages_across_equal_timestamps(self) -> None:
+        first = self.create_session("会议室预约\n首版")
+        second = self.create_session("补货申请")
+        with self.service.repo.connect() as conn:
+            conn.execute("UPDATE discussion_sessions SET updated_at = ?", ("2026-11-25T12:00:00.000Z",))
+
+        response = self.client.get("/api/v1/discussions", params={"limit": 1})
+        self.assertEqual(response.status_code, 200, response.text)
+        page = response.json()
+        other = self.client.get("/api/v1/discussions", params={"limit": 1, "cursor": page["next_cursor"]}).json()
+        items = [*page["items"], *other["items"]]
+        self.assertEqual([item["id"] for item in items], sorted([first["id"], second["id"]], reverse=True))
+        self.assertEqual({item["title"] for item in items}, {"会议室预约 首版", "补货申请"})
+        self.assertIsNone(other["next_cursor"])
+        self.assertEqual(self.client.get("/api/v1/discussions", params={"cursor": "invalid"}).status_code, 422)
+        self.assertEqual(self.client.get(f"/api/v1/discussions/{first['id']}/drafts/missing").status_code, 404)
+
+    def test_deleted_chat_is_hidden_and_its_model_execution_is_revoked(self) -> None:
+        self.service.agent_mode = "simulation"
+        first = self.create_session("待删除的测试会话")
+        other = self.create_session("保留的测试会话")
+        path = f"/api/v1/discussions/{first['id']}"
+        self.assertIsNotNone(self.service.repo.claim_run(first["id"], "simulation", "worker", 30))
+
+        self.assertEqual(self.client.delete(path).json(), {"deleted": True})
+        self.assertEqual(self.client.delete(path).status_code, 200)
+        self.assertEqual(self.client.get(path).status_code, 404)
+        self.assertEqual(self.client.get(path + "/messages").status_code, 404)
+        self.assertEqual(self.client.get(path + "/drafts/old").status_code, 404)
+        self.assertIsNone(self.service.repo.claim_run(first["id"], "simulation", "next-worker", 30))
+        self.assertEqual(self.service.repo.pending_runs("simulation"), [other["id"]])
+        self.assertEqual([row["id"] for row in self.client.get("/api/v1/discussions").json()["items"]], [other["id"]])
 
     def test_create_is_idempotent(self) -> None:
         key = str(uuid.uuid4())

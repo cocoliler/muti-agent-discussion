@@ -68,6 +68,7 @@ class Phase(str, Enum):
     RESPONSES = "responses"
     INTEGRATION = "integration"
     DRAFTING = "drafting"
+    STANCES = "stances"
 
 
 class TaskKind(str, Enum):
@@ -80,6 +81,7 @@ class TaskKind(str, Enum):
     DRAFT = "draft"
     #: 权衡分歧的收敛打分，由主持人按维度给各方案打分。
     SCORING = "scoring"
+    STANCE = "stance"
 
 
 class MessageKind(str, Enum):
@@ -96,6 +98,7 @@ class MessageKind(str, Enum):
     REVIEW = "review"
     DECISION = "decision"
     SYSTEM = "system"
+    STANCE = "stance"
 
 
 class Severity(str, Enum):

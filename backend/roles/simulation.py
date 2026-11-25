@@ -96,8 +96,19 @@ def _specialist(req):
     elif req.topic:
         text += f" 本轮重点核对「{req.topic}」。"
     result = dict(text=text, basis=basis, source_seqs=_sources(message))
+    if req.kind == "stance":
+        result["stances"] = [
+            {"option_id": option.option_id, "position": "conditional",
+             "reason": ADVICE[req.role].format(option.title), "source_seqs": _sources(message)}
+            for option in req.candidate_options
+        ]
     if directed:
         result["verification"] = "；".join(issue.closure_condition for issue in directed)
+        result["responses"] = [
+            {"issue_id": issue.issue_id, "treatment": issue.closure_condition,
+             "verification": issue.closure_condition, "source_seqs": _sources(message)}
+            for issue in directed
+        ]
     return result
 
 
@@ -234,9 +245,14 @@ def _scribe(req):
     critic = _latest(req, {"critic"})
     supporting_seqs.update(_sources(critic))
     cited = sorted(supporting_seqs.union(seq for seqs in mapping.values() for seq in seqs))
+    changes = [
+        {"previous_id": identifier, "replacement_ids": [], "reason": "按当前用户输入重建规格，此需求未沿用。"}
+        for identifier in req.previous_requirement_ids if identifier not in mapping
+    ]
     return dict(text=f"已整理「{spec['product_name']}」的 {len(items)} 条需求及对应来源。",
                 source_seqs=cited, content=spec, source_map=mapping, agreements=list(req.consensus),
-                alternatives=[], disagreements=pending, assumptions=[], risks=[critic.text] if critic else [])
+                alternatives=[], disagreements=pending, assumptions=[], risks=[critic.text] if critic else [],
+                requirement_changes=changes)
 
 
 def _review(req):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
 from discussion_orchestration import (
     Agenda,
@@ -23,6 +24,7 @@ from discussion_orchestration import (
     WaitingFor,
     draft_blockers,
 )
+from discussion_orchestration.models import OptionStance
 from discussion_orchestration.scoring import rank_options, validate
 from discussion_orchestration.validation import validate_assignments
 
@@ -139,13 +141,23 @@ class TradeoffScoringFlowTest(unittest.TestCase):
         scored = self.engine.submit_output(self.session, output)
 
         self.assertTrue(scored.ok, scored.code)
-        self.assertEqual(scored.detail["chosen_option_id"], "A")
-        self.assertEqual(self.session.chosen_option_id, "A")
         self.assertEqual(len(self.session.scorecards), 1)
         self.assertAlmostEqual(self.session.scorecards[0].weights[ScoreDimension.USER_VALUE], 0.30, places=2)
-        # 权衡分歧随评分收敛关闭，随后可以正常成稿。
-        self.assertEqual(self.session.issues["I-T"].status.value, "closed")
+        self.assertEqual(self.session.issues["I-T"].status.value, "open")
+        self.assertEqual(self.session.waiting_for, WaitingFor.ROLE_RESULTS)
+        self.assertTrue(scored.tasks)
+        for stance_task in scored.tasks:
+            self.assertTrue(all(seq < self.session.messages[-1].seq for seq in stance_task.message_seqs))
+            stance = replace(output, task_id=stance_task.task_id, role=stance_task.role, kind=TaskKind.STANCE,
+                             scorecard=None, stances=tuple(
+                                 OptionStance(option.option_id, "conditional", "需明确验证条件", (1,))
+                                 for option in self.session.scorecards[0].options
+                             ))
+            self.assertTrue(self.engine.submit_output(self.session, stance).ok)
         self.assertEqual(self.session.waiting_for, WaitingFor.HOST_DECISION)
+        self.assertEqual(set(self.session.scorecards[0].stances), {task.role for task in scored.tasks})
+        self.assertEqual(self.session.chosen_option_id, "A")
+        self.assertEqual(self.session.issues["I-T"].status.value, "closed")
         self.assertIn("采纳 A", self.session.messages[-1].text)
 
         drafting = self.engine.submit_candidate_draft(self.session)

@@ -142,7 +142,8 @@ class MessageRowTest(unittest.TestCase):
         message = Msg(seq=7, role=Role.CHALLENGER, kind=Kind.CHALLENGE, text="证据？",
                       source_seqs=(5, 6), reply_to_seq=5, item_refs=("FR-02",), round_no=2)
         row = dump_message_row(message, "s-9", "2026-11-23T00:00:00Z")
-        self.assertEqual(len(row), 14)
+        self.assertEqual(len(row), 15)
+        self.assertEqual(row[-1], '{}')
         self.assertEqual(row[0], "s-9")
         self.assertEqual(row[1], 7)
         self.assertEqual(row[2], "challenger")
