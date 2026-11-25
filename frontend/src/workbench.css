@@ -40,15 +40,11 @@
 .roles i[data-status='running'] { background: #2563a6; }
 .roles i[data-status='done'], .roles i[data-status='succeeded'] { background: #278457; }
 .roles i[data-status='failed'], .roles i[data-status='timed_out'] { background: #b34047; }
-.budget-panel summary { color: var(--muted); font-size: 13px; cursor: pointer; }
-.budget-panel .budget { margin-top: 12px; }
 .sidebar-tools { display: grid; gap: 8px; margin-top: 16px; }
 .sidebar-tools > details { min-width: 0; padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; background: #fbfcf8; }
 .sidebar-tools > details > .live-form { margin-top: 10px; }
 .sidebar-tools p, .sidebar-tools button { font-size: 13px; }
 .sidebar-tools .json-input { min-height: 150px; }
-.sidebar-tools .sidebar-quota { padding-top: 10px; border-top: 1px solid var(--border); }
-.sidebar-tools .issue-choice label { align-items: flex-start; overflow-wrap: anywhere; }
 .task-dialog { width: min(490px, calc(100vw - 28px)); max-height: 85dvh; padding: 18px; border: 1px solid var(--border); border-radius: 14px; color: var(--ink); background: var(--surface); }
 .task-dialog::backdrop { background: #13251d80; }
 .task-dialog-header { display: flex; align-items: start; gap: 10px; }
@@ -156,7 +152,6 @@
   .workbench-shell .live-workspace { grid-template-columns: minmax(0, 1fr) minmax(260px, 36vw); }
   .workbench-shell .rail { padding: 10px 14px; max-height: none; }
   .workbench-shell .discussion, .workbench-shell .spec { height: max(590px, 76dvh); }
-  .workbench-shell .rail > .budget-panel { display: block; margin-top: 6px; }
   .workbench-shell .rail > .sidebar-tools { display: grid; }
 }
 @media (max-width: 600px) {

@@ -14,12 +14,10 @@ ActionType = Literal[
     "pause",
     "resume",
     "cancel",
-    "extend_quota",
     "retry",
     "run_agents",
     "abandon_task",
     "require_changes",
-    "resolve_issues",
     "submit_output",
     "submit_review",
     "submit_agenda",
@@ -31,17 +29,8 @@ class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
 
 
-class LimitsModel(_Strict):
-    max_total_rounds: int = Field(default=12, ge=1, le=100)
-    max_directed_rounds: int = Field(default=2, ge=0, le=20)
-    max_revision_rounds: int = Field(default=2, ge=0, le=20)
-    max_naming_passes_per_round: int = Field(default=2, ge=0, le=20)
-    max_dispatch_units: int = Field(default=64, ge=1, le=1000)
-
-
 class CreateDiscussionRequest(_Strict):
     idea: str = Field(min_length=1, max_length=4000)
-    limits: LimitsModel | None = None
 
 
 class ClarificationAnswerModel(_Strict):
@@ -164,7 +153,6 @@ class SessionView(_Strict):
     drafts: list[DraftHistoryItem] = Field(default_factory=list)
     reviews: list[ReviewSummary] = Field(default_factory=list)
     open_issues: list[dict[str, Any]] = Field(default_factory=list)
-    budget: dict[str, Any] = Field(default_factory=dict)
 
 
 class MessagePage(_Strict):

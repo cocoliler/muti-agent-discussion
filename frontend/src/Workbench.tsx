@@ -12,7 +12,7 @@ const statusLabels: Record<string, string> = {
 };
 const waitingLabels: Record<string, string> = {
   host_agenda: '等待主持人提交议题', host_decision: '等待主持人调度', role_results: '等待角色结果',
-  user_input: '等待你补充信息或裁决问题', review: '等待独立评审', none: '当前没有待处理的调度',
+  user_input: '等待你补充信息', review: '等待独立评审', none: '当前没有待处理的调度',
 };
 const phaseLabels: Record<string, string> = {
   statements: '专业角色发言', challenge: '质疑', responses: '定向回应', integration: '整合', drafting: '成稿',
@@ -38,7 +38,6 @@ const kindLabels: Record<string, string> = {
   response: '回应', integration: '整合', draft: '草稿', review: '评审', decision: '决定', system: '系统',
 };
 const taskLabels = { ...kindLabels, statement: '专业角色发言', integration: '整合讨论结果', draft: '撰写规格草稿' } as Record<string, string>;
-const budgets = [['rounds', '总轮次'], ['directed', '定向轮次'], ['revisions', '修订轮次'], ['dispatch_units', '派发单元']];
 const storageKey = 'design-room.discussion';
 const projectKey = 'design-room.project';
 const defaultActions = [
@@ -95,9 +94,6 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [answerToEdit, setAnswerToEdit] = useState<number | null>(null);
   const [action, setAction] = useState<Action | ''>('');
   const [payload, setPayload] = useState('');
-  const [selectedIssues, setSelectedIssues] = useState<string[]>([]);
-  const [quota, setQuota] = useState({ rounds: 0, directed: 0, revisions: 0 });
-  const [note, setNote] = useState('');
   const [agendaDraft, setAgendaDraft] = useState<{ version: number; text: string } | null>(null);
   const thread = useRef<HTMLDivElement>(null);
   const projectIdeaField = useRef<HTMLTextAreaElement>(null);
@@ -182,10 +178,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     setReply(null);
     setAction('');
     setPayload('');
-    setSelectedIssues([]);
-    setNote('');
     setAgendaDraft(null);
-    setQuota({ rounds: 0, directed: 0, revisions: 0 });
     setSubstantive(true);
     setHighlight(null);
     setItemRef(null);
@@ -299,8 +292,6 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const relatedMessages = taskSelection ? messages.filter((message) => selectedTask
     ? message.task_id === selectedTask.task_id || selectedTask.message_seqs?.includes(message.seq)
     : message.role === taskSelection.role).slice(-5) : [];
-  const displayedIssues = session?.open_issues ?? [];
-  const selected = displayedIssues.filter((issue) => selectedIssues.includes(issue.issue_id)).map((issue) => issue.issue_id);
   const activeDraft = session?.active_draft;
   const canConfirm = session?.status === 'awaiting_confirmation' && activeDraft?.review_verdict === 'pass'
     && activeDraft.input_version === session.input_version;
@@ -323,11 +314,6 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const agentRunning = hostWorking || session?.participants.some((person) => isWorkingRole(person.role) && person.status === 'running');
   const failedAgent = session?.participants.find((person) => person.status === 'failed' && (
     isWorkingRole(person.role)));
-  const reviewerFailure = session?.participants.find((person) => person.role === 'reviewer' && person.status === 'failed');
-  const reachedReviewLimit = reviewerFailure?.error_code === 'revision_rounds_exceeded' || reviewerFailure?.error_code === 'rounds_exceeded';
-  const requiredReviewQuota = reachedReviewLimit && session && (paused || session.waiting_for === 'review')
-    ? [session.budget.revisions_left === 0 ? '修订轮次' : '', session.budget.rounds_left === 0 ? '总轮次' : ''].filter(Boolean).join('和')
-    : '';
   const projectIdea = messages.find((message) => message.kind === 'user_input')?.text;
   const latestIdea = messages.filter((message) => message.kind === 'user_input').at(-1)?.text.trim() ?? '';
   const editingAgenda = agendaDraft !== null && agendaDraft.version === session?.input_version;
@@ -340,7 +326,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
       items: [{ topic_id: 'T1', title: question.split(/\r?\n/, 1)[0].slice(0, 80), question }],
     }, () => setAgendaDraft(null));
   };
-  const nextStep = requiredReviewQuota ? '等待追加讨论额度' : paused ? '讨论已暂停' : terminal ? statusLabels[session!.status]
+  const nextStep = paused ? '讨论已暂停' : terminal ? statusLabels[session!.status]
     : agentsEnabled && (waitingForAgenda || autoExchange) && failedAgent && !agentRunning ? '有 Agent 执行失败'
       : waitingForAgenda ? (agentsEnabled ? '主持人正在整理议题' : '准备开始讨论')
         : autoExchange ? (session.waiting_for === 'review' ? '独立评审正在检查规格'
@@ -367,29 +353,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
               <span className="task-chevron" aria-hidden="true">›</span>
             </button>
           </li>;
-        })}</ul>
-        <details className="budget-panel"><summary>讨论额度</summary><dl className="budget">{budgets.map(([key, name]) => <div key={key}><dt>{name}</dt><dd>剩余 {session.budget[`${key}_left`] ?? 0}</dd></div>)}</dl></details></>}
+        })}</ul></>}
         {session && !terminal && <div className="sidebar-tools">
-          <details><summary>人工决策与额度</summary>
-            <div className="live-form">
-              {displayedIssues.map((issue) => <div className="issue-choice" key={issue.issue_id}>
-                <label className="check"><input type="checkbox" checked={selected.includes(issue.issue_id)} onChange={(event) =>
-                  setSelectedIssues(event.target.checked ? [...selected, issue.issue_id] : selected.filter((key) => key !== issue.issue_id))} />
-                  {issue.issue_id} · {issue.summary}{issue.severity === 'blocking' ? '（阻断）' : ''}</label>
-                <div className="references">{issue.source_seqs?.map((seq) => <button key={seq} onClick={() => locate(seq)}>#{seq}</button>)}</div>
-              </div>)}
-              {displayedIssues.length > 0 && <>
-                <label>裁决说明<textarea rows={2} value={note} onChange={(event) => setNote(event.target.value)} /></label>
-                <div className="action-row">
-                  {selected.length > 0 && <button disabled={busy || !note.trim() || paused} onClick={() => act('resolve_issues', { issue_ids: selected, note: note.trim() }, () => { setSelectedIssues([]); setNote(''); })}>裁决所选问题</button>}
-                </div>
-              </>}
-              <form className="live-form sidebar-quota" onSubmit={(event) => { event.preventDefault(); act('extend_quota', quota, () => setQuota({ rounds: 0, directed: 0, revisions: 0 })); }}>
-                {(['rounds', 'directed', 'revisions'] as const).map((key, index) => <label key={key}>{budgets[index][1]}<input type="number" min={0} max={1000} required value={quota[key]} onChange={(event) => setQuota({ ...quota, [key]: Number(event.target.value) })} /></label>)}
-                <button disabled={busy || !Object.values(quota).some((value) => value > 0)}>追加额度</button>
-              </form>
-            </div>
-          </details>
           {!paused && <details><summary>编排联调</summary>
             <div className="live-form"><p>{agentsEnabled ? '角色任务由 Agent 执行。联调时也可在这里手动提交结果。' : '可在这里手动提交议题和角色结果。'}</p>
               {!session.pending_tasks && <div className="action-row"><button disabled={busy} onClick={() => act('retry')}>读取待处理任务</button></div>}
@@ -475,10 +440,9 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
               {agentsEnabled && (waitingForAgenda || autoExchange) && <p>{session.agent_mode === 'simulation' ? '模拟 Agent' : '模型 Agent'}生成的发言会自动显示在讨论中。</p>}
               {failedAgent?.error_code === 'PROVIDER_CONFIG' && <p>请检查后端的 DeepSeek 密钥和模型名配置。</p>}
               {failedAgent?.diagnostic && <p>输出校验失败：{failedAgent.diagnostic}</p>}
-              {requiredReviewQuota && <p>评审要求继续修订。请在左侧「人工决策与额度」追加{requiredReviewQuota}，再{paused ? '恢复讨论' : '继续执行 Agent'}。</p>}
               {session.waiting_for === 'role_results' && !paused && !autoExchange && <p>收到角色结果后，会显示在讨论中。</p>}
             </div></div>
-            {!paused && !requiredReviewQuota && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent && !(failedAgent.role === 'reviewer' && reachedReviewLimit) ? '重试 Agent' : '继续执行 Agent'}</button>}
+            {!paused && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent ? '重试 Agent' : '继续执行 Agent'}</button>}
             {canConfirm && <a href="#live-spec-title">查看待签收规格</a>}
             {waitingForAgenda && !agentsEnabled && <form className="live-form agenda-form" onSubmit={(event) => {
               event.preventDefault();
@@ -513,7 +477,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
               <button className="primary" disabled={busy || !text.trim()}>发送</button></div>
           </form>}
           <div className="action-row">
-            <button disabled={busy || (paused && Boolean(requiredReviewQuota))} onClick={() => act(paused ? 'resume' : 'pause')}>{paused ? '恢复讨论' : '暂停讨论'}</button>
+            <button disabled={busy} onClick={() => act(paused ? 'resume' : 'pause')}>{paused ? '恢复讨论' : '暂停讨论'}</button>
             <button disabled={busy} onClick={() => { if (window.confirm('取消后，此会话将结束。')) act('cancel'); }}>取消讨论</button>
           </div>
         </footer>}

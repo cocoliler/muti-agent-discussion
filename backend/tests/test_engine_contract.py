@@ -90,7 +90,6 @@ class EngineContractTest(unittest.TestCase):
         restored = codec.loads(codec.dumps(self.session), orch.DiscussionSession)
         self.assertEqual(restored.named_responses, self.session.named_responses)
         self.assertEqual(restored.dispatch_units, self.session.dispatch_units)
-        self.assertEqual(restored.naming_passes, self.session.naming_passes)
 
 
 if __name__ == "__main__":

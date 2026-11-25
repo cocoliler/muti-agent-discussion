@@ -130,7 +130,7 @@ def validate_assignments(
             if issue.needs_user:
                 return (
                     ReasonCode.ISSUE_NEEDS_USER,
-                    f"问题 {issue_id} 需要用户裁决，不能点名角色回应",
+                    f"问题 {issue_id} 需要用户补充事实，不能点名角色回应",
                 )
             if issue.status != IssueStatus.OPEN:
                 return (

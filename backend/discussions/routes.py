@@ -58,8 +58,9 @@ def get_service() -> DiscussionService:
     return _service
 
 
-def _canonical_hash(payload: BaseModel) -> str:
-    raw = json.dumps(payload.model_dump(mode="json"), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+def _canonical_hash(payload: BaseModel, **legacy_fields: Any) -> str:
+    fields = {**payload.model_dump(mode="json"), **legacy_fields}
+    raw = json.dumps(fields, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -139,13 +140,12 @@ def create_router(
     ) -> Any:
         pid = _uuid(project_id, "project_id")
         key = _require_key(idempotency_key)
-        limits = body.limits.model_dump() if body.limits else None
         status, payload = service.create(
             pid,
             body.idea,
-            limits,
             idempotency_key=key,
-            request_hash=_canonical_hash(body),
+            # Preserve idempotency keys recorded by the previous create schema.
+            request_hash=_canonical_hash(body, limits=None),
             scope=f"POST /api/v1/projects/{pid}/discussions",
             request_id=_request_id(request),
         )
@@ -234,7 +234,7 @@ def create_router(
             request_id=_request_id(request),
         )
         if agents is not None and payload["decision"]["ok"] and body.type in {"run_agents", "submit_agenda", "submit_output", "propose",
-                                                      "resolve_issues", "require_changes", "resume"}:
+                                                      "require_changes", "resume"}:
             background_tasks.add_task(agents.run, service, sid)
         return JSONResponse(payload, status_code=status)
 

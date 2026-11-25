@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
-from discussion_orchestration.enums import ReasonCode, SessionStatus
 from discussion_orchestration.models import ClarificationAnswer
 
 from .codec import CodecError, decode, encode
@@ -39,7 +38,6 @@ class DiscussionService:
             from discussion_orchestration import (  # 惰性导入：未装引擎时本模块仍可导入
                 Agenda,
                 DiscussionEngine,
-                DiscussionLimits,
                 HostProposal,
                 ReviewResult,
                 SpeakerOutput,
@@ -48,7 +46,6 @@ class DiscussionService:
             engine = engine or DiscussionEngine()
             models = {
                 "Agenda": Agenda,
-                "DiscussionLimits": DiscussionLimits,
                 "HostProposal": HostProposal,
                 "ReviewResult": ReviewResult,
                 "SpeakerOutput": SpeakerOutput,
@@ -62,7 +59,6 @@ class DiscussionService:
         self,
         project_id: str,
         idea: str,
-        limits: Mapping[str, Any] | None,
         *,
         idempotency_key: str | None = None,
         request_hash: str = "",
@@ -76,17 +72,11 @@ class DiscussionService:
             if replayed is not None:
                 return replayed
 
-        kwargs: dict[str, Any] = {}
-        if limits:
-            kwargs["limits"] = self.models["DiscussionLimits"](**dict(limits))
         session = self.engine.create_session(
             session_id=str(uuid4()),
             project_id=project_id,
             idea=idea,
         )
-        # 引擎的 create_session 只接受三个关键字参数；自定义额度在建会话后挂到会话上
-        if "limits" in kwargs:
-            session.limits = kwargs["limits"]
         body = self._render(session, {"state_version": 1})
         self.repo.create_session(
             session,
@@ -357,18 +347,8 @@ class DiscussionService:
             "resume": lambda: engine.resume(session),
             "cancel": lambda: engine.cancel(session, payload.get("reason", "")),
             "require_changes": lambda: engine.require_changes(session, payload.get("reason", "")),
-            "extend_quota": lambda: engine.extend_quota(
-                session,
-                revisions=int(payload.get("revisions", 0)),
-                directed=int(payload.get("directed", 0)),
-                rounds=int(payload.get("rounds", 0)),
-                reason=payload.get("reason", ""),
-            ),
             "abandon_task": lambda: engine.abandon_task(
                 session, payload.get("task_id", ""), payload.get("reason", "")
-            ),
-            "resolve_issues": lambda: engine.resolve_issue_by_user(
-                session, tuple(payload.get("issue_ids", ())), payload.get("note", "")
             ),
             "submit_output": lambda: engine.submit_output(
                 session, decode_payload("SpeakerOutput")
@@ -403,14 +383,7 @@ class DiscussionService:
         request_id: str,
         idempotency: tuple[str, str, str] | None,
     ) -> tuple[int, dict[str, Any]]:
-        # 评审通过校验后可能因轮次额度而暂停。保留拒绝结论，并提交引擎进入的暂停状态。
-        review_paused = (
-            action == "submit_review"
-            and meta["status"] == SessionStatus.REVIEWING.value
-            and session.status == SessionStatus.PAUSED
-            and decision.code in (ReasonCode.REVISION_ROUNDS_EXCEEDED, ReasonCode.ROUNDS_EXCEEDED)
-        )
-        if not decision.ok and not review_paused:
+        if not decision.ok:
             return self._reject(decision)
 
         previous_last_seq = meta["last_seq"]
@@ -488,6 +461,11 @@ class DiscussionService:
             body = json.loads(row["response_body"] or "{}")
         except json.JSONDecodeError:
             body = {}
+        # Older idempotent responses may still contain the retired field.
+        if isinstance(body, dict):
+            body.pop("budget", None)
+            if isinstance(body.get("session"), dict):
+                body["session"].pop("budget", None)
         return int(row["status_code"] or 200), body
 
     @staticmethod
@@ -554,17 +532,6 @@ class DiscussionService:
                     review_verdict = getattr(item.verdict, "value", item.verdict)
                     break
 
-        limits = session.limits
-        budget = {
-            "rounds_used": session.round_no,
-            "rounds_left": max(0, limits.max_total_rounds - session.round_no),
-            "directed_used": session.directed_rounds,
-            "directed_left": max(0, limits.max_directed_rounds - session.directed_rounds),
-            "revisions_used": session.revision_rounds,
-            "revisions_left": max(0, limits.max_revision_rounds - session.revision_rounds),
-            "dispatch_units_used": session.dispatch_units,
-            "dispatch_units_left": max(0, limits.max_dispatch_units - session.dispatch_units),
-        }
         return {
             "id": session.session_id,
             "project_id": session.project_id,
@@ -619,7 +586,6 @@ class DiscussionService:
                 for item in getattr(session, "reviews", ()) or ()
             ],
             "open_issues": [encode(issue) for issue in session.open_issues()],
-            "budget": budget,
         }
 
     def _participants(self, session: Any) -> list[dict[str, Any]]:

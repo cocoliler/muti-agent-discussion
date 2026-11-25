@@ -40,7 +40,7 @@ install(app, with_export=True)  # 正式工作台启用签收后的下载；嵌�
 | GET | `/api/v1/discussions/{id}` | 200 | 阶段、参与者、当前草稿与正文、草稿/评审历史、预算、`state_version` |
 | GET | `/api/v1/discussions/{id}/messages?after_seq=&limit=` | 200 | 增量分页；`limit` 默认 20 / 最大 100，游标 `next_cursor` |
 | POST | `/api/v1/discussions/{id}/messages` | 200 | 用户补充/回复，带上下文 `input_version` |
-| POST | `/api/v1/discussions/{id}/actions` | 200 | `pause`/`resume`/`cancel`/`extend_quota`/`require_changes`/`resolve_issues`/`submit_*` |
+| POST | `/api/v1/discussions/{id}/actions` | 200 | `pause`/`resume`/`cancel`/`require_changes`/`submit_*` |
 | POST | `/api/v1/discussions/{id}/confirm` | 200 | 签收：先过 `spec_handoff.sign_off` 门禁，通过后写 `spec_handoffs`（含正文与 `content_hash`） |
 | GET | `/api/v1/discussions/{id}/export` | 200 | 下载已签收的 UTF-8 `DesignSpecContent` 正文；未签收时返回 409 |
 

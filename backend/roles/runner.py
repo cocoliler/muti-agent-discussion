@@ -42,6 +42,8 @@ class RoleResult(BaseModel):
 class RoleRunner:
     """一个会话共享一个实例，所有调用从同一个事件循环发起。"""
 
+    MAX_ATTEMPTS = 2
+
     def __init__(self, session_id: str, provider: Provider, *, mode: Literal["simulation", "real"],
                  call_limit: int = 32, timeout_seconds: float = 45):
         if type(call_limit) is not int or call_limit < 1:
@@ -92,7 +94,7 @@ class RoleRunner:
         messages = build_messages(request)
         self._active.add(task_id)
         try:
-            for number in range(len(result.attempts) + 1, 3):
+            for number in range(len(result.attempts) + 1, self.MAX_ATTEMPTS + 1):
                 # 在第一次 await 之前预留；并行角色和传输重试共享会话额度。
                 if self.calls_used >= self.call_limit:
                     result.error = "call_limit"
@@ -154,7 +156,7 @@ class RoleRunner:
                 if error == "invalid_output":
                     validation_diagnostic = diagnostic
                     retryable = self.calls_used < self.call_limit
-                if not retryable or number == 2:
+                if not retryable:
                     break
             return result
         finally:

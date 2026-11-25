@@ -40,7 +40,6 @@ def session_view(**overrides):
         "participants": [{"role": "user", "status": "done", "attempt_no": None}],
         "active_draft": None,
         "open_issues": [],
-        "budget": {"rounds_left": 12},
     }
     view.update(overrides)
     return view
@@ -52,8 +51,8 @@ class FakeService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict]] = []
 
-    def create(self, project_id, idea, limits, **kwargs):
-        self.calls.append(("create", {"project_id": project_id, "idea": idea, "limits": limits, **kwargs}))
+    def create(self, project_id, idea, **kwargs):
+        self.calls.append(("create", {"project_id": project_id, "idea": idea, **kwargs}))
         return 201, session_view()
 
     def view(self, session_id):

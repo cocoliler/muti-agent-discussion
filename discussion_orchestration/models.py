@@ -28,17 +28,6 @@ from .enums import (
 
 
 @dataclass(frozen=True)
-class DiscussionLimits:
-    """讨论预算与轮次上限。派发前由编排器预检。"""
-
-    max_total_rounds: int = 12
-    max_directed_rounds: int = 2
-    max_revision_rounds: int = 2
-    max_naming_passes_per_round: int = 2
-    max_dispatch_units: int = 64
-
-
-@dataclass(frozen=True)
 class Assumption:
     """主持人标注的可暂用假设：来源、影响、验证方式。"""
 
@@ -106,7 +95,7 @@ class Message:
 
 @dataclass
 class Issue:
-    """待处理问题。ID 跨修订稳定，关闭需证据或用户裁决。"""
+    """待处理问题。ID 跨修订稳定，关闭阻断问题需证据。"""
 
     issue_id: str
     topic_id: str
@@ -249,7 +238,6 @@ class DiscussionSession:
 
     session_id: str
     project_id: str
-    limits: DiscussionLimits = field(default_factory=DiscussionLimits)
     status: SessionStatus = SessionStatus.CLARIFYING
     input_version: int = 1
     snapshot_ref: str = "snap-v1"
@@ -274,7 +262,6 @@ class DiscussionSession:
     failures: dict[str, list[str]] = field(default_factory=dict)
     directed_rounds: int = 0
     revision_rounds: int = 0
-    naming_passes: int = 0
     dispatch_units: int = 0
     round_challenged: bool = False
     paused_from: SessionStatus | None = None

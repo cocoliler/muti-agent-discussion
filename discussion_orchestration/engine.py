@@ -5,7 +5,7 @@
 - 议题调度：首个议题激活、逐议题推进、议题切换；
 - 首轮并行派发、质疑、点名回应、记录员整合；
 - 人工澄清（暂停等用户补充）与定向修订（评审退回只调度相关角色）；
-- 轮次与调用上限校验、输入版本与快照一致性校验。
+- 输入版本与快照一致性校验。
 
 不在本层：角色正文生成与模型调用、HTTP 与持久化、界面渲染、规格契约校验与导出。
 """
@@ -32,7 +32,6 @@ from .enums import (
 )
 from .models import (
     ClarificationAnswer,
-    DiscussionLimits,
     DiscussionSession,
     Decision,
     DraftRevision,
@@ -71,15 +70,12 @@ class _Dispatch:
 class DiscussionEngine:
     """纯内存编排器。所有方法只改传入的会话对象，不做 IO。"""
 
-    def __init__(self, limits: DiscussionLimits | None = None) -> None:
-        self.limits = limits or DiscussionLimits()
-
     # ------------------------------------------------------------ 会话与用户
     def create_session(
         self, *, session_id: str, project_id: str, idea: str
     ) -> DiscussionSession:
         session = DiscussionSession(
-            session_id=session_id, project_id=project_id, limits=self.limits
+            session_id=session_id, project_id=project_id
         )
         self._append(session, Role.USER, MessageKind.USER_INPUT, idea)
         return session
@@ -145,7 +141,6 @@ class DiscussionEngine:
         session.challenged_topics.clear()
         session.round_results.clear()
         session.named_responses.clear()
-        session.naming_passes = 0
         session.round_challenged = False
         session.round_kind = None
         session.phase = None
@@ -171,44 +166,6 @@ class DiscussionEngine:
             },
         )
 
-    def resolve_issue_by_user(
-        self, session: DiscussionSession, issue_ids: tuple[str, ...], note: str
-    ) -> Decision:
-        """用户对需要裁决的问题给出结论。"""
-
-        if session.status not in (SessionStatus.DISCUSSING, SessionStatus.CLARIFYING):
-            return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不接受用户裁决")
-        if not issue_ids:
-            return self._reject(session, ReasonCode.UNKNOWN_ISSUE, "未指定问题")
-        if not note.strip():
-            return self._reject(session, ReasonCode.REASON_REQUIRED, "用户裁决需要说明理由")
-        for issue_id in issue_ids:
-            issue = session.issues.get(issue_id)
-            if issue is None:
-                return self._reject(session, ReasonCode.UNKNOWN_ISSUE, f"问题 {issue_id} 不存在")
-            if issue.status != IssueStatus.OPEN:
-                return self._reject(
-                    session, ReasonCode.ISSUE_ALREADY_CLOSED, f"问题 {issue_id} 已处理"
-                )
-        seq = self._append(
-            session,
-            Role.USER,
-            MessageKind.DECISION,
-            f"用户裁决：{note}",
-            issue_ids=issue_ids,
-        ).seq
-        for issue_id in issue_ids:
-            issue = session.issues[issue_id]
-            issue.status = IssueStatus.USER_DECIDED
-            issue.closed_by_seq = seq
-        if session.status == SessionStatus.DISCUSSING:
-            session.waiting_for = WaitingFor.HOST_DECISION
-        elif session.round_kind is not None and session.agenda is not None:
-            # 澄清来自讨论中段的裁决卡，用户给出结论后回到讨论
-            self._transition(session, SessionStatus.DISCUSSING)
-            session.waiting_for = WaitingFor.HOST_DECISION
-        return self._result(session, ReasonCode.OK, detail={"issue_ids": list(issue_ids)})
-
     # ------------------------------------------------------------ 议题调度
     def submit_agenda(self, session: DiscussionSession, agenda) -> Decision:
         """主持人提交「动作、议题、目标角色、问题、理由」的调度建议。"""
@@ -220,8 +177,6 @@ class DiscussionEngine:
         problems = validate_agenda(agenda)
         if problems:
             return self._reject(session, ReasonCode.INVALID_AGENDA, "；".join(problems))
-        if session.round_no + 1 > session.limits.max_total_rounds:
-            return self._reject(session, ReasonCode.ROUNDS_EXCEEDED, "轮次已达上限")
 
         session.agenda = agenda
         lead = agenda.items[0]
@@ -275,8 +230,6 @@ class DiscussionEngine:
         index = next(i for i, candidate in enumerate(items) if candidate.topic_id == item.topic_id)
         if index + 1 >= len(items):
             return self._reject(session, ReasonCode.LAST_TOPIC, "已是最后一个议题，可提交候选稿")
-        if session.round_no + 1 > session.limits.max_total_rounds:
-            return self._reject(session, ReasonCode.ROUNDS_EXCEEDED, "轮次已达上限")
 
         session.closed_topics.add(item.topic_id)
         next_item = items[index + 1]
@@ -369,10 +322,6 @@ class DiscussionEngine:
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前不在等待主持人调度")
         if session.tasks:
             return self._reject(session, ReasonCode.PENDING_TASKS, "仍有角色任务未提交")
-        if session.naming_passes >= session.limits.max_naming_passes_per_round:
-            return self._reject(
-                session, ReasonCode.NAMING_LIMIT_EXCEEDED, "本回合点名次数已达上限"
-            )
         problem = validate_assignments(session, assignments)
         if problem:
             return self._reject(session, problem[0], problem[1])
@@ -381,7 +330,6 @@ class DiscussionEngine:
             for issue_id in issue_ids:
                 session.issues[issue_id].assignee = role
         session.named_responses = {role: tuple(ids) for role, ids in assignments.items()}
-        session.naming_passes += 1
         self._append(
             session,
             Role.HOST,
@@ -397,7 +345,7 @@ class DiscussionEngine:
         assignments: Mapping[Role, tuple[str, ...]],
         reason: str = "",
     ) -> Decision:
-        """开一轮定向补充，轮次上限内有效。"""
+        """开一轮定向补充。"""
 
         if session.status != SessionStatus.DISCUSSING:
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不能开定向补充轮")
@@ -405,14 +353,6 @@ class DiscussionEngine:
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前不在等待主持人调度")
         if session.tasks:
             return self._reject(session, ReasonCode.PENDING_TASKS, "仍有角色任务未提交")
-        if session.directed_rounds >= session.limits.max_directed_rounds:
-            return self._reject(
-                session,
-                ReasonCode.DIRECTED_ROUNDS_EXCEEDED,
-                f"定向补充轮已达上限 {session.limits.max_directed_rounds}",
-            )
-        if session.round_no + 1 > session.limits.max_total_rounds:
-            return self._reject(session, ReasonCode.ROUNDS_EXCEEDED, "轮次已达上限")
         problem = validate_assignments(session, assignments)
         if problem:
             return self._reject(session, problem[0], problem[1])
@@ -424,7 +364,6 @@ class DiscussionEngine:
             session,
             RoundKind.DIRECTED,
             assignments={role: tuple(ids) for role, ids in assignments.items()},
-            naming_passes=1,
         )
         seq = self._append(
             session,
@@ -482,6 +421,8 @@ class DiscussionEngine:
                     "输入版本已更新，旧版本结果不能推进当前会话",
                 )
             return self._reject(session, ReasonCode.UNKNOWN_TASK, f"未知任务 {output.task_id}")
+        if session.status != SessionStatus.DISCUSSING or session.waiting_for != WaitingFor.ROLE_RESULTS:
+            return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不接受角色结果")
         if output.role != task.role or output.kind != task.kind:
             return self._reject(
                 session, ReasonCode.CONTRACT_MISMATCH, "角色或任务类型与派发不一致"
@@ -578,7 +519,8 @@ class DiscussionEngine:
                 detail={"verdict": "pass", "draft_id": draft.draft_id},
             )
 
-        if review.verdict == Verdict.NEEDS_INPUT:
+        stalled = review.verdict == Verdict.REVISE and self._revision_stalled(session, draft, review)
+        if review.verdict == Verdict.NEEDS_INPUT or stalled:
             session.reviews.append(review)
             self._append(
                 session,
@@ -592,37 +534,26 @@ class DiscussionEngine:
             session.round_kind = None
             session.phase = None
             session.round_challenged = False
-            questions = "；".join(review.questions or tuple(f.summary for f in review.findings)) or "需要补充关键事实"
+            questions = review.questions
+            if stalled:
+                questions = tuple(dict.fromkeys(
+                    f"关于「{finding.summary}」，请补充满足以下条件的依据或约束：{finding.close_condition}"
+                    for finding in review.findings
+                ))
+            prompt = "；".join(questions or tuple(f.summary for f in review.findings)) or "需要补充关键事实"
             self._append(
                 session,
                 Role.REVIEWER,
                 MessageKind.CLARIFICATION,
-                f"需要用户补充：{questions}",
+                f"需要用户补充：{prompt}",
                 item_refs=tuple(f.target_item for f in review.findings),
-                clarification_questions=review.questions,
+                clarification_questions=questions,
             )
             return self._result(
                 session,
                 ReasonCode.AWAITING_USER_INPUT,
                 detail={"verdict": "needs_input", "findings": len(review.findings)},
             )
-
-        # REVISE：额度先校验，避免拒绝时写入部分状态
-        if session.revision_rounds >= session.limits.max_revision_rounds:
-            self._pause(
-                session,
-                ReasonCode.REVISION_ROUNDS_EXCEEDED,
-                "修订额度已耗尽，等待用户补充证据或授权追加额度",
-            )
-            return self._result(
-                session,
-                ReasonCode.REVISION_ROUNDS_EXCEEDED,
-                ok=False,
-                detail={"revision_rounds": session.revision_rounds},
-            )
-        if session.round_no + 1 > session.limits.max_total_rounds:
-            self._pause(session, ReasonCode.ROUNDS_EXCEEDED, "轮次已达上限，等待用户决定")
-            return self._result(session, ReasonCode.ROUNDS_EXCEEDED, ok=False)
 
         # 只调度评审点名的负责角色；未指派的发现拒绝整份评审
         assignments = self._revision_assignments(session, review)
@@ -643,7 +574,7 @@ class DiscussionEngine:
         )
         self._transition(session, SessionStatus.DISCUSSING)
         decision = self._begin_round(
-            session, RoundKind.REVISION, assignments=assignments, naming_passes=1
+            session, RoundKind.REVISION, assignments=assignments
         )
         return Decision(
             ok=decision.ok,
@@ -736,7 +667,7 @@ class DiscussionEngine:
 
         if task_id not in session.tasks:
             return self._reject(session, ReasonCode.UNKNOWN_TASK, f"未知任务 {task_id}")
-        self._pause(session, ReasonCode.BUDGET_EXHAUSTED, reason or "角色任务失败，讨论暂停")
+        self._pause(session, reason or "角色任务失败，讨论暂停")
         return self._result(session, ReasonCode.OK, detail={"task_id": task_id})
 
     def pause(self, session: DiscussionSession, reason: str = "") -> Decision:
@@ -744,7 +675,7 @@ class DiscussionEngine:
             return self._reject(session, ReasonCode.INVALID_STATUS, "会话已暂停")
         if not can_pause(session.status):
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不能暂停")
-        self._pause(session, ReasonCode.OK, reason or "讨论已暂停")
+        self._pause(session, reason or "讨论已暂停")
         return self._result(session, ReasonCode.OK)
 
     def resume(self, session: DiscussionSession) -> Decision:
@@ -752,7 +683,11 @@ class DiscussionEngine:
             return self._reject(session, ReasonCode.INVALID_STATUS, "会话未暂停")
         if not can_resume(session.paused_from):
             return self._reject(session, ReasonCode.INVALID_TRANSITION, "缺少可恢复的暂停点")
-        session.status = session.paused_from or SessionStatus.DISCUSSING
+        legacy_dispatch_pause = next(
+            (message.text for message in reversed(session.messages) if message.kind == MessageKind.SYSTEM),
+            "",
+        ) == "讨论调用预算耗尽，等待用户授权追加"
+        session.status = session.paused_from
         session.paused_from = None
         fallback = {
             SessionStatus.CLARIFYING: WaitingFor.HOST_AGENDA,
@@ -763,6 +698,8 @@ class DiscussionEngine:
             session.status, WaitingFor.ROLE_RESULTS if session.tasks else WaitingFor.HOST_DECISION)
         session.paused_waiting_for = None
         self._append(session, Role.HOST, MessageKind.SYSTEM, "已恢复讨论")
+        if legacy_dispatch_pause and session.status == SessionStatus.DISCUSSING and not session.tasks and session.phase:
+            return self._enter_phase(session, session.phase)
         return self._result(session, ReasonCode.OK)
 
     def cancel(self, session: DiscussionSession, reason: str = "") -> Decision:
@@ -781,33 +718,6 @@ class DiscussionEngine:
         )
         return self._result(session, ReasonCode.OK)
 
-    def extend_quota(
-        self,
-        session: DiscussionSession,
-        *,
-        revisions: int = 0,
-        directed: int = 0,
-        rounds: int = 0,
-        reason: str = "",
-    ) -> Decision:
-        """用户明确授权追加额度。"""
-
-        if any(value < 0 for value in (revisions, directed, rounds)):
-            return self._reject(session, ReasonCode.INVALID_ASSIGNMENT, "追加额度不能为负数")
-        session.limits = replace(
-            session.limits,
-            max_revision_rounds=session.limits.max_revision_rounds + revisions,
-            max_directed_rounds=session.limits.max_directed_rounds + directed,
-            max_total_rounds=session.limits.max_total_rounds + rounds,
-        )
-        self._append(
-            session,
-            Role.USER,
-            MessageKind.DECISION,
-            reason or f"授权追加额度：修订+{revisions}，定向+{directed}，总轮次+{rounds}",
-        )
-        return self._result(session, ReasonCode.OK, detail={"limits": session.limits})
-
     # ------------------------------------------------------------ 内部实现
     def _begin_round(
         self,
@@ -815,7 +725,6 @@ class DiscussionEngine:
         kind: RoundKind,
         *,
         assignments: Mapping[Role, tuple[str, ...]] | None = None,
-        naming_passes: int = 0,
     ) -> Decision:
         session.round_no += 1
         session.round_kind = kind
@@ -825,7 +734,6 @@ class DiscussionEngine:
         session.named_responses = {
             role: tuple(issue_ids) for role, issue_ids in (assignments or {}).items()
         }
-        session.naming_passes = naming_passes
         if kind == RoundKind.DIRECTED:
             session.directed_rounds += 1
         elif kind == RoundKind.REVISION:
@@ -840,7 +748,7 @@ class DiscussionEngine:
                 session,
                 dispatch.code,
                 ok=False,
-                message="讨论调用预算耗尽，已暂停等待用户决定",
+                message="当前没有可派发的议题",
             )
         session.waiting_for = WaitingFor.ROLE_RESULTS
         return self._result(session, ReasonCode.OK, tasks=dispatch.tasks)
@@ -864,15 +772,6 @@ class DiscussionEngine:
             specs.append((Role.RECORDER, TaskKind.INTEGRATION, ()))
         elif phase == Phase.DRAFTING:
             specs.append((Role.RECORDER, TaskKind.DRAFT, ()))
-        if not specs:
-            return _Dispatch()
-
-        if session.dispatch_units + len(specs) > session.limits.max_dispatch_units:
-            self._pause(
-                session, ReasonCode.BUDGET_EXHAUSTED, "讨论调用预算耗尽，等待用户授权追加"
-            )
-            return _Dispatch(code=ReasonCode.BUDGET_EXHAUSTED)
-
         tasks: list[SpeakerTask] = []
         for ordinal, (role, kind, issue_ids) in enumerate(specs):
             task_id = (
@@ -1017,7 +916,7 @@ class DiscussionEngine:
                 if issue is None:
                     return (ReasonCode.UNKNOWN_ISSUE, f"问题 {issue_id} 不存在")
                 if issue.needs_user:
-                    return (ReasonCode.ISSUE_NEEDS_USER, f"问题 {issue_id} 等待用户裁决")
+                    return (ReasonCode.ISSUE_NEEDS_USER, f"问题 {issue_id} 等待用户补充事实")
                 if issue.status != IssueStatus.OPEN:
                     return (ReasonCode.ISSUE_ALREADY_CLOSED, f"问题 {issue_id} 已处理")
                 if issue.severity == Severity.BLOCKING and not output.evidence:
@@ -1116,6 +1015,38 @@ class DiscussionEngine:
             },
         )
 
+    @staticmethod
+    def _revision_stalled(session: DiscussionSession, draft: DraftRevision, review: ReviewResult) -> bool:
+        if not review.findings:
+            return False
+
+        def scope(result: ReviewResult) -> set[tuple[str, str]]:
+            return {(finding.issue_id or finding.finding_id, finding.target_item) for finding in result.findings}
+
+        def content(revision: DraftRevision) -> dict:
+            body = dict(revision.content)
+            body.pop("removed_requirement_ids", None)
+            if isinstance(body.get("requirements"), (list, tuple)):
+                body["requirements"] = [
+                    {key: value for key, value in item.items() if key != "source_seqs"}
+                    if isinstance(item, Mapping) else item
+                    for item in body["requirements"]
+                ]
+            return body
+
+        current_scope = scope(review)
+        current_content = content(draft)
+        prior_reviews = {
+            item.draft_id: item for item in session.reviews
+            if item.input_version == draft.input_version and item.verdict == Verdict.REVISE
+        }
+        return any(
+            prior.draft_id in prior_reviews
+            and scope(prior_reviews[prior.draft_id]) == current_scope
+            and content(prior) == current_content
+            for prior in session.drafts if prior.draft_id != draft.draft_id
+        )
+
     def _revision_assignments(
         self, session: DiscussionSession, review: ReviewResult
     ) -> dict[Role, tuple[str, ...]] | None:
@@ -1125,7 +1056,7 @@ class DiscussionEngine:
             if finding.responsible_role is not None
             and finding.responsible_role in NAMABLE_ROLES
         ]
-        if not responsible:
+        if not responsible or len(responsible) != len(review.findings):
             return None
         topic_id = session.topic_id
         if topic_id is None and session.agenda is not None:
@@ -1144,10 +1075,14 @@ class DiscussionEngine:
                     raised_by=Role.REVIEWER,
                     summary=finding.summary,
                     severity=finding.severity,
+                    source_seqs=finding.source_seqs,
                     assignee=role,
                     input_version=session.input_version,
                 )
             else:
+                existing.summary = finding.summary
+                existing.severity = finding.severity
+                existing.source_seqs = finding.source_seqs
                 existing.status = IssueStatus.OPEN
                 existing.assignee = role
                 existing.needs_user = False
@@ -1169,7 +1104,7 @@ class DiscussionEngine:
         )
         return f"评审 {verdict} 草稿 v{draft.version}" + (f"。{details}" if details else "")
 
-    def _pause(self, session: DiscussionSession, code: ReasonCode, message: str) -> None:
+    def _pause(self, session: DiscussionSession, message: str) -> None:
         if session.status == SessionStatus.PAUSED:
             return
         if not can_pause(session.status):
@@ -1178,7 +1113,7 @@ class DiscussionEngine:
         session.paused_waiting_for = session.waiting_for
         session.status = SessionStatus.PAUSED
         session.waiting_for = WaitingFor.HOST_DECISION
-        self._append(session, Role.HOST, MessageKind.SYSTEM, message or code.value)
+        self._append(session, Role.HOST, MessageKind.SYSTEM, message)
 
     def _transition(self, session: DiscussionSession, target: SessionStatus) -> None:
         assert_transition(session.status, target)
@@ -1224,7 +1159,6 @@ class DiscussionEngine:
     def _activate_topic(self, session: DiscussionSession, item) -> None:
         session.topic_id = item.topic_id
         session.named_responses.clear()
-        session.naming_passes = 0
         session.round_results.clear()
         session.round_challenged = False
 

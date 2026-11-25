@@ -141,17 +141,6 @@ class DiscussionRepository:
         idempotency: tuple[str, str, str, int, str] | None = None,
     ) -> dict[str, Any]:
         now = utcnow()
-        limits = getattr(session, "limits", None)
-        snapshot = config_snapshot or json.dumps(
-            {
-                "max_total_rounds": getattr(limits, "max_total_rounds", None),
-                "max_directed_rounds": getattr(limits, "max_directed_rounds", None),
-                "max_revision_rounds": getattr(limits, "max_revision_rounds", None),
-                "max_naming_passes_per_round": getattr(limits, "max_naming_passes_per_round", None),
-                "max_dispatch_units": getattr(limits, "max_dispatch_units", None),
-            },
-            ensure_ascii=False,
-        )
         with self._write() as conn:
             conn.execute(
                 """
@@ -168,7 +157,7 @@ class DiscussionRepository:
                     session.round_no,
                     session.last_seq,
                     getattr(getattr(session, "current_draft", None), "draft_id", None),
-                    snapshot,
+                    config_snapshot or "{}",
                     self._dump(session),
                     now,
                     now,

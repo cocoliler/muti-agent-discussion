@@ -252,10 +252,6 @@ def load_session(raw: str) -> Any:
     return loads(raw, _engine().DiscussionSession)
 
 
-def dump_limits(limits: Any) -> str:
-    return dumps(limits)
-
-
 def dump_output(output: Any) -> str:
     return dumps(output)
 

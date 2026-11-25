@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from backend.discussions.routes import build_service, create_app
 from backend.discussions.agent_execution import AgentExecution
+from backend.roles.runner import RoleRunner
 from discussion_orchestration import SessionStatus, WaitingFor
 from backend.roles.contracts import RoleRequest
 from backend.roles.provider import Completion, DeepSeekProvider, ProviderError
@@ -224,44 +225,106 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                                       ["product", "research", "architect", "designer", "business"])
                 self.assertEqual(client.get(path).json()["waiting_for"], "user_input")
 
-    def test_review_quota_pause_persists_until_authorized_resume(self):
-        cases = [({"max_revision_rounds": 0}, "revision_rounds_exceeded", {"revisions": 1}),
-                 ({"max_total_rounds": 1}, "rounds_exceeded", {"rounds": 1})]
-        for limits, code, quota in cases:
-            with self.subTest(code=code), TemporaryDirectory() as directory, \
-                    patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}):
-                service = build_service(Path(directory) / "discussion.sqlite3")
-                with TestClient(create_app(service, with_agents=True)) as client:
-                    headers = lambda: {"Idempotency-Key": str(uuid4())}
+    def test_revisions_switch_bounded_execution_batches_automatically(self):
+        complete = SimulationProvider.complete
+        runners = []
+
+        def track_runner(*args, **kwargs):
+            runner = RoleRunner(*args, **kwargs)
+            runners.append(runner)
+            return runner
+
+        async def extended_revision(provider, request, messages):
+            response = await complete(provider, request, messages)
+            output = json.loads(response.content)
+            if request.role == "scribe" and request.draft:
+                output["content"]["product_name"] = f"会议室预约 v{request.draft.revision + 1}"
+            if request.role == "reviewer" and request.draft.revision < 18:
+                output["verdict"] = "REVISE"
+                for finding in output["findings"]:
+                    finding["status"] = "open"
+            return Completion(json.dumps(output), response.usage)
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(SimulationProvider, "complete", extended_revision), \
+                patch("backend.discussions.agent_execution.RoleRunner", side_effect=track_runner):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                self.assertEqual(created.status_code, 201, created.text)
+                session_id = created.json()["id"]
+                state = client.get(f"/api/v1/discussions/{session_id}").json()
+                self.assertEqual(state["status"], "awaiting_confirmation", state)
+                self.assertEqual(state["active_draft"]["version"], 18)
+                session, _ = service.repo.load_state(session_id)
+                self.assertGreater(session.dispatch_units, 64)
+                self.assertGreater(len(runners), 1)
+                attempts = service.repo.list_attempts(session_id)
+                self.assertEqual(sum(runner.calls_used for runner in runners), len(attempts))
+                self.assertTrue(all(0 < runner.calls_used <= 32 for runner in runners))
+                self.assertTrue(all(attempt["status"] == "SUCCEEDED" for attempt in attempts))
+                self.assertEqual(len({attempt["logical_task_id"] for attempt in attempts}), len(attempts))
+
+    def test_repeated_unchanged_revision_requests_clarification(self):
+        complete = SimulationProvider.complete
+
+        async def unresolved_review(provider, request, messages):
+            response = await complete(provider, request, messages)
+            if request.role != "reviewer":
+                return response
+            output = json.loads(response.content)
+            output["verdict"] = "REVISE"
+            for finding in output["findings"]:
+                finding["status"] = "open"
+            return Completion(json.dumps(output), response.usage)
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(SimulationProvider, "complete", unresolved_review):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                self.assertEqual(created.status_code, 201, created.text)
+                state = client.get(f"/api/v1/discussions/{created.json()['id']}").json()
+                self.assertEqual(state["status"], "clarifying", state)
+                self.assertEqual(state["waiting_for"], "user_input")
+                self.assertEqual(state["active_draft"]["version"], 3)
+                self.assertEqual(state["reviews"][-1]["verdict"], "revise")
+                self.assertTrue(state["clarification"]["questions"])
+
+    def test_legacy_quota_pause_resumes_without_more_quota(self):
+        complete = SimulationProvider.complete
+
+        async def failed_review(provider, request, messages):
+            if request.role == "reviewer":
+                raise ProviderError("revision_rounds_exceeded")
+            return await complete(provider, request, messages)
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                with patch.object(SimulationProvider, "complete", failed_review):
                     created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
-                        "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。", "limits": limits,
-                    }, headers=headers())
-                    self.assertEqual(created.status_code, 201, created.text)
-                    session_id = created.json()["id"]
-                    path = f"/api/v1/discussions/{session_id}"
-                    paused = client.get(path).json()
-                    self.assertEqual(paused["status"], "paused")
-                    self.assertEqual(paused["active_draft"]["version"], 1)
-                    self.assertEqual(paused["reviews"], [])
-                    self.assertIn(code, [p["error_code"] for p in paused["participants"]])
-                    before = service.repo.list_attempts(session_id)
-                    blocked_retry = client.post(f"{path}/actions", headers=headers(), json={
-                        "type": "run_agents", "expected_state_version": paused["state_version"],
-                    })
-                    self.assertEqual(blocked_retry.status_code, 200, blocked_retry.text)
-                    self.assertEqual(service.repo.list_attempts(session_id), before)
-                    updated = client.post(f"{path}/actions", headers=headers(), json={
-                        "type": "extend_quota", "payload": quota,
-                        "expected_state_version": client.get(path).json()["state_version"],
-                    })
-                    self.assertTrue(updated.json()["decision"]["ok"], updated.text)
-                    resumed = client.post(f"{path}/actions", headers=headers(), json={
-                        "type": "resume", "expected_state_version": updated.json()["session"]["state_version"],
-                    })
-                    self.assertTrue(resumed.json()["decision"]["ok"], resumed.text)
-                    state = client.get(path).json()
-                    self.assertEqual(state["status"], "awaiting_confirmation", state)
-                    self.assertEqual(state["active_draft"]["version"], 2)
+                        "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。",
+                    }, headers={"Idempotency-Key": str(uuid4())})
+                self.assertEqual(created.status_code, 201, created.text)
+                session_id = created.json()["id"]
+                path = f"/api/v1/discussions/{session_id}"
+                session, meta = service.repo.load_state(session_id)
+                self.assertEqual(session.status, SessionStatus.REVIEWING)
+                service.engine.pause(session, "修订额度已耗尽，等待用户补充证据或授权追加额度")
+                session._codec_extra = {"limits": {"max_revision_rounds": 0}}
+                saved = service.repo.save_after_decision(session, meta["state_version"])
+                resumed = client.post(f"{path}/actions", headers={"Idempotency-Key": str(uuid4())}, json={
+                    "type": "resume", "expected_state_version": saved["state_version"],
+                })
+                self.assertTrue(resumed.json()["decision"]["ok"], resumed.text)
+                state = client.get(path).json()
+                self.assertEqual(state["status"], "awaiting_confirmation", state)
+                self.assertEqual(state["active_draft"]["version"], 2)
 
     def test_real_provider_runs_revision_until_user_signoff(self):
         calls = []

@@ -142,8 +142,8 @@ class ServiceTest(unittest.TestCase):
         )
         self.repo.init_schema()
         self.engine = FakeEngine()
-        self.service = DiscussionService(self.repo, engine=self.engine, models={"DiscussionLimits": Limits})
-        self.view = self.service.create("p-1", "做一个会议室预约工具", None)[1]
+        self.service = DiscussionService(self.repo, engine=self.engine, models={})
+        self.view = self.service.create("p-1", "做一个会议室预约工具")[1]
         self.sid = self.view["id"]
 
     def tearDown(self) -> None:
@@ -154,7 +154,7 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual(self.view["last_seq"], 1)
         self.assertEqual(self.view["state_version"], 1)
         self.assertEqual(self.view["waiting_for"], "host_agenda")
-        self.assertEqual(self.view["budget"]["rounds_left"], 12)
+        self.assertNotIn("budget", self.view)
 
     def test_post_message_commits_and_projects(self) -> None:
         status, body = self.service.post_message(

@@ -124,9 +124,6 @@ h1, h2, h3, p { margin: 0; }
 .action-row input[type="number"] { width: 78px; }
 .session-status { margin-bottom: 24px; padding: 10px; background: #252138; border-radius: 8px; }
 .session-status p, .roles small { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
-.budget { margin: 0; font-size: 12px; }
-.budget > div { display: flex; flex-wrap: wrap; gap: 4px 8px; justify-content: space-between; margin-bottom: 8px; }
-.budget dd { margin: 0; color: var(--muted); }
 .workbench-error { display: block; max-height: 18%; overflow: auto; }
 .workbench-error ul { margin-block: 7px; }
 .message-body p { white-space: pre-wrap; }
@@ -136,6 +133,5 @@ h1, h2, h3, p { margin: 0; }
 .draft-context pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 810px) {
   .live-workspace .rail > .session-status { display: block; margin: 0; }
-  .live-workspace .rail > .roles, .live-workspace .rail > .budget { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0 0; }
-  .live-workspace .rail .budget > div { margin: 0 6px 0 0; }
+  .live-workspace .rail > .roles { display: flex; flex-wrap: wrap; gap: 4px; margin: 5px 0 0; }
 }

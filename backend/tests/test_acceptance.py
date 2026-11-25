@@ -126,10 +126,22 @@ class AcceptanceTest(unittest.TestCase):
         self.assertEqual(body["input_version"], 1)
         self.assertEqual(self.view(body["id"])["id"], body["id"])
 
-    def test_custom_limits_take_effect(self) -> None:
-        """引擎 create_session 不接收 limits，额度必须由服务层挂载后才生效。"""
-        body = self.create_session(limits={"max_total_rounds": 3})
-        self.assertEqual(body["budget"]["rounds_left"], 3)
+    def test_removed_discussion_controls_are_rejected(self) -> None:
+        body = self.create_session()
+        self.assertNotIn("budget", body)
+        headers = {"Idempotency-Key": str(uuid.uuid4())}
+        response = self.client.post(
+            f"/api/v1/projects/{PROJECT_ID}/discussions",
+            json={"idea": "会议室预约", "limits": {"max_total_rounds": 3}}, headers=headers,
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        for action in ("extend_quota", "resolve_issues"):
+            response = self.client.post(
+                f"/api/v1/discussions/{body['id']}/actions", headers=headers,
+                json={"type": action, "expected_state_version": body["state_version"]},
+            )
+            self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.view(body["id"])["state_version"], body["state_version"])
 
     def test_create_is_idempotent(self) -> None:
         key = str(uuid.uuid4())

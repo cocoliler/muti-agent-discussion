@@ -71,14 +71,14 @@ stateDiagram-v2
 | 结果归属 | `task_id + role + kind + round_no + topic_id + input_version + snapshot_ref` 全部匹配才合并 | 不匹配返回 `CROSS_SESSION_RESULT` / `CONTRACT_MISMATCH` / `STALE_ROUND` |
 | 引用 | 来源与回复只能指向本会话已提交消息 | 跨会话引用返回 `CROSS_SESSION_REFERENCE` |
 | 点名 | 目标角色必须落在当前议题 `role_scope` 内，主持人与评审不可被点名 | 越界返回 `INVALID_TARGET_ROLE` |
-| 问题关闭 | 阻断问题必须带 `evidence` 才能由回应关闭，否则只能由用户裁决 | 缺少证据返回 `MISSING_EVIDENCE` |
+| 问题关闭 | 阻断问题必须带 `evidence` 才能由回应关闭 | 缺少证据返回 `MISSING_EVIDENCE` |
 | 评审 | 通过结论不得附带阻断发现，签收要求同版本 PASS 评审 | `REVIEW_PASS_WITH_BLOCKING` / `REVIEW_NOT_PASSED` |
-| 轮次 | 总回合、定向补充、评审修订、单回合点名次数、派发单元各自计数，额满暂停并由 `extend_quota` 显式追加 | `ROUNDS_EXCEEDED` / `DIRECTED_ROUNDS_EXCEEDED` / `REVISION_ROUNDS_EXCEEDED` / `NAMING_LIMIT_EXCEEDED` / `BUDGET_EXHAUSTED` |
+| 修订收敛 | 同一输入版本再次出现相同规格正文和同一组未解决评审项时，生成澄清问题 | `AWAITING_USER_INPUT` |
 
 人工澄清与多议题调度的行为约定：
 
 - 用户实质补充后升级输入版本，主持人重建议题快照，首轮任务全部带新版本与新快照；
-- 用户裁决关闭阻断问题后会话从 `CLARIFYING` 回到 `DISCUSSING`，可继续点名或送审；
+- 需要关键事实时由用户补充，随后主持人基于新输入版本推进讨论；
 - 多议题按顺序派发，前一议题未收敛不能切换，候选稿需全部议题的发言与质疑齐备。
 
 ## 6. 关键不变量
@@ -86,8 +86,8 @@ stateDiagram-v2
 1. **消息序号单调**：`_append` 是唯一写入口，回复与来源只能指向本会话已提交序号。
 2. **结果身份一致**：任务身份字段全部匹配才合并，同一逻辑任务只合并一份有效结果。
 3. **点名范围受限**：目标角色必须落在议题 `role_scope` 内。
-4. **问题关闭要有依据**：阻断问题需证据或用户裁决才能关闭。
-5. **轮次上限**：默认总回合 12、定向补充 2、评审修订 2、单回合点名 2 次、派发单元 64；额满暂停，由显式授权追加。
+4. **问题关闭要有依据**：关闭阻断问题需要证据或可验证的处理方式。
+5. **自动执行批次**：角色执行器每批最多调用 32 次。讨论仍需推进时，执行器自动开启下一批。
 6. **草稿版本化**：每次送审生成新的 `DraftRevision`（`parent_id` 指向上一版），旧版本 `current=False`；签收只认当前版本 + 同版本 PASS 评审。
 
 ## 7. 使用示例

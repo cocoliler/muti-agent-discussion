@@ -75,6 +75,12 @@ class AgentExecution:
 
         runner = RoleRunner(session_id, provider, mode=self.mode)
         while jobs:
+            # Keep each task and its retry in one batch. Recompute pending jobs from
+            # committed state so rolling over cannot replay successful tasks.
+            if runner.call_limit - runner.calls_used < runner.MAX_ATTEMPTS:
+                runner = RoleRunner(session_id, provider, mode=self.mode)
+            slots = (runner.call_limit - runner.calls_used) // runner.MAX_ATTEMPTS
+            jobs = jobs[:slots]
             starts = [self._start(service, job) for job in jobs]
             results = await asyncio.gather(*(runner.run(job.request, validation_diagnostic=diagnostic)
                                              for job, (_, diagnostic) in zip(jobs, starts)), return_exceptions=True)
@@ -117,8 +123,8 @@ class AgentExecution:
                 and not session.tasks and session.current_item() is not None):
             item = session.current_item()
             issues = session.open_issues(item.topic_id)
-            if issues and (any(issue.needs_user for issue in issues)
-                           or session.naming_passes >= session.limits.max_naming_passes_per_round):
+            if any(issue.needs_user for issue in issues):
+                issues = [issue for issue in issues if issue.needs_user]
                 proposal = {"action": "ask_user", "questions": [issue.summary for issue in issues],
                             "issue_ids": [issue.issue_id for issue in issues]}
             elif issues:

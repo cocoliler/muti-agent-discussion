@@ -59,7 +59,6 @@ export type Session = {
   drafts: (DraftVersion & { current: boolean })[];
   reviews: { review_id: string; draft_id: string; verdict: string; findings: Finding[] }[];
   open_issues: { issue_id: string; summary: string; severity: string; status: string; source_seqs: number[] }[];
-  budget: Record<string, number>;
 };
 
 export type Task = {
@@ -76,8 +75,8 @@ export type Task = {
   issue_ids?: string[];
 };
 
-export type Action = 'pause' | 'resume' | 'cancel' | 'extend_quota' | 'retry' | 'run_agents' | 'abandon_task' |
-  'require_changes' | 'resolve_issues' | 'submit_output' | 'submit_review' | 'submit_agenda' | 'propose';
+export type Action = 'pause' | 'resume' | 'cancel' | 'retry' | 'run_agents' | 'abandon_task' |
+  'require_changes' | 'submit_output' | 'submit_review' | 'submit_agenda' | 'propose';
 
 export type Handoff = { draft_id: string; confirmed_at: string; content_hash: string | null; export_url: string | null };
 
