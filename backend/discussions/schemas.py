@@ -149,6 +149,7 @@ class OptionStanceView(_Strict):
     position: str
     reason: str
     source_seqs: list[int] = Field(default_factory=list)
+    score_dimension: str | None = None
 
 
 class ScorecardView(_Strict):

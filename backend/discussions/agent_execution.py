@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 ROLE_ALIASES = {"business": "market", "challenger": "critic", "recorder": "scribe"}
 ENGINE_ROLES = {alias: role for role, alias in ROLE_ALIASES.items()}
+RECENT_CONTEXT_LIMIT = 24
+OPTIONAL_CONTEXT_CHARS = 16000
 
 
 @dataclass(frozen=True)
@@ -210,9 +212,9 @@ class AgentExecution:
 
     def _jobs(self, session) -> list[Job]:
         replaced = {m.replaces_answer_seq for m in session.messages if m.replaces_answer_seq is not None}
-        history = [m for m in session.messages if m.seq not in replaced and m.substantive
+        history = [m for m in session.messages if m.seq not in replaced and m.substantive and m.text.strip()
                    and (not replaced or m.role == Role.USER or m.input_version == session.input_version)]
-        user_messages = [m for m in history if m.kind == MessageKind.USER_INPUT and m.text.strip()]
+        user_messages = [m for m in history if m.kind == MessageKind.USER_INPUT]
         if not user_messages:
             return []
         idea = "\n".join(m.text for m in user_messages)
@@ -233,93 +235,109 @@ class AgentExecution:
         jobs = []
         for task in session.tasks.values():
             all_messages = task.kind in (TaskKind.INTEGRATION, TaskKind.DRAFT, TaskKind.SCORING)
-            messages = history if all_messages else [m for m in history if m.seq in task.message_seqs]
+            # Recover older evidence without exposing messages committed after dispatch.
+            cutoff = max(task.message_seqs, default=0)
+            messages = [m for m in history if m.seq <= cutoff]
+            visible = {m.seq: m for m in messages}
             previous = session.drafts[-1] if session.drafts and all_messages else None
-            issues = self._review_issues(session, previous.draft_id, history) if previous else []
+            issues = self._review_issues(session, previous.draft_id, messages) if previous else []
             if task.kind in (TaskKind.INTEGRATION, TaskKind.DRAFT):
                 known = {issue.issue_id for issue in issues}
+                answered = [issue for issue in session.issues.values()
+                            if issue.input_version == session.input_version and issue.assignee
+                            and issue.response and issue.response_seq in visible and issue.issue_id not in known]
+                peer_answers = [issue for issue in answered if issue.raised_by == Role.CHALLENGER
+                                and issue.topic_id == task.topic_id]
                 issues.extend(
-                    self._prior_issue(session, issue, issue.assignee.value)
-                    for issue in session.issues.values()
-                    if issue.raised_by == Role.USER and issue.input_version == session.input_version
-                    and issue.assignee and issue.response and issue.issue_id not in known
+                    self._prior_issue(visible, issue, issue.assignee.value)
+                    for issue in [*(item for item in answered if item.raised_by == Role.USER), *peer_answers[-8:]]
                 )
             parent = draft if all_messages else None
             # 回答被替换后只能使用新的可见消息重建正文；旧评审项仍要逐项复核。
             if previous and issues and (not replaced or previous.input_version == session.input_version):
                 parent = previous
-            if task.kind == TaskKind.SCORING:
+            if task.kind in (TaskKind.SCORING, TaskKind.STANCE):
                 # Older snapshots did not store the tradeoff IDs on scoring tasks.
                 issue_ids = task.issue_ids or tuple(
                     issue.issue_id for issue in session.open_issues(task.topic_id)
                     if issue.kind == DivergenceKind.TRADEOFF
                 )
-                issues = [self._prior_issue(session, session.issues[issue_id], "recorder") for issue_id in issue_ids
+                issues = [self._prior_issue(visible, session.issues[issue_id], "recorder") for issue_id in issue_ids
                           if issue_id in session.issues]
                 parent = None
             elif task.kind == TaskKind.RESPONSE:
-                issues = [self._prior_issue(session, session.issues[issue_id], task.role.value) for issue_id in task.issue_ids
-                          if issue_id in session.issues]
+                owner = ROLE_ALIASES.get(task.role.value, task.role.value)
+                findings = {
+                    issue.issue_id: issue for issue in self._review_issues(session, draft.draft_id, messages)
+                    if issue.owner_role == owner
+                } if draft else {}
+                issues = [findings.get(issue_id) or self._prior_issue(visible, session.issues[issue_id], owner)
+                          for issue_id in task.issue_ids if issue_id in session.issues]
             previous_ids = ()
             if task.kind == TaskKind.DRAFT and previous and parent is None:
                 previous_ids = tuple(item.requirement_id for item in DraftSpec.parse(previous.content).requirements)
             card = next((card for card in reversed(session.scorecards)
                          if card.input_version == session.input_version and card.topic_id == task.topic_id), None)
             candidates = () if task.kind != TaskKind.STANCE or card is None else card.options
-            jobs.append(self._job(session, messages, idea, task.role.value, task.kind.value, task.topic_id,
+            task_idea = "\n".join(m.text for m in user_messages if m.seq <= cutoff)
+            jobs.append(self._job(session, messages, task_idea, task.role.value, task.kind.value, task.topic_id,
                                   task=task, topic=topic, allowed_roles=item.role_scope if item else None,
                                   draft=parent, issues=issues, candidates=candidates, previous_ids=previous_ids))
         return jobs
 
     @staticmethod
-    def _prior_issue(session, issue, owner) -> PriorIssue:
-        response_seq = issue.response_seq or issue.closed_by_seq
-        closing = next((m.text for m in session.messages if m.seq == response_seq), None)
+    def _prior_issue(visible, issue, owner) -> PriorIssue:
+        closing = visible.get(issue.closed_by_seq or issue.response_seq)
+        response = issue.response if issue.response_seq in visible else None
         refs = list(issue.source_seqs)
-        if issue.response:
-            refs.extend(issue.response.source_seqs)
+        if response:
+            refs.extend((*response.source_seqs, issue.response_seq))
         if closing:
-            refs.append(response_seq)
+            refs.append(closing.seq)
         return PriorIssue(issue_id=issue.issue_id, severity="blocking" if issue.severity.value == "blocking" else "advisory",
                           kind=getattr(getattr(issue, "kind", None), "value", "fact"),
                           target_item="background", description=issue.summary,
                           owner_role=ROLE_ALIASES.get(owner, owner),
-                          closure_condition=issue.summary,
-                          treatment=issue.response.treatment if issue.response else closing,
+                          closure_condition=issue.closure_condition or issue.summary,
+                          treatment=response.treatment if response else closing.text if closing else None,
+                          verification=response.verification if response and response.verification.strip() else None,
                           source_seqs=list(dict.fromkeys(refs)))
 
     def _pending_review_issues(self, session, parent_id, history) -> list[PriorIssue]:
         issues = self._review_issues(session, parent_id, history)
         known = {issue.issue_id for issue in issues}
+        visible = {m.seq: m for m in history}
         for issue in session.issues.values():
             if (issue.issue_id not in known and issue.input_version == session.input_version
                     and issue.status.value == "answered" and issue.response and issue.severity.value == "blocking"):
-                issues.append(self._prior_issue(session, issue, issue.assignee.value if issue.assignee else "recorder"))
+                issues.append(self._prior_issue(visible, issue, issue.assignee.value if issue.assignee else "recorder"))
         return issues
 
     def _review_issues(self, session, draft_id, history) -> list[PriorIssue]:
         review = session.review_of(draft_id) if draft_id else None
         if review is None:
             return []
-        visible = {m.seq: m for m in history if m.text.strip()}
+        visible = {m.seq: m for m in history}
         result = []
         for finding in review.findings:
             # NEEDS_INPUT 的发现存在评审记录中，只有 REVISE 会创建定向整改任务。
             key = finding.issue_id or finding.finding_id
             issue = session.issues.get(key)
-            closure = (issue.response_seq or issue.closed_by_seq) if issue and issue.input_version == review.input_version else None
+            closure = (issue.closed_by_seq or issue.response_seq) if issue and issue.input_version == review.input_version else None
             message = visible.get(closure)
             owner = finding.responsible_role.value if finding.responsible_role else "recorder"
             refs = list(finding.source_seqs)
-            response = issue.response if issue and closure else None
+            response = issue.response if issue and issue.input_version == review.input_version and issue.response_seq in visible else None
             if response:
-                refs.extend(seq for seq in response.source_seqs if seq not in refs)
-            if message and message.seq not in refs:
+                refs.extend((*response.source_seqs, issue.response_seq))
+            if message:
                 refs.append(message.seq)
             result.append(PriorIssue(issue_id=key, target_item=finding.target_item, description=finding.summary,
                                      severity="blocking" if finding.severity.value == "blocking" else "advisory",
                                      owner_role=ROLE_ALIASES.get(owner, owner), closure_condition=finding.close_condition,
-                                     treatment=response.treatment if response else message.text if message else None, source_seqs=refs))
+                                     treatment=response.treatment if response else message.text if message else None,
+                                     verification=response.verification if response and response.verification.strip() else None,
+                                     source_seqs=list(dict.fromkeys(refs))))
         return result
 
     @staticmethod
@@ -333,23 +351,11 @@ class AgentExecution:
                                      revision=draft.version, content=spec.to_content(),
                                      source_map={req.requirement_id: list(req.source_seqs) for req in spec.requirements},
                                      analysis=AgentExecution._message_analysis(draft))
-        messages = [m for m in messages if m.text.strip()]
-        if kind in {"integration", "draft", "review", "scoring"}:
-            # Keep the evidence needed to validate the frozen draft and prior
-            # findings. Unrelated early discussion does not need to be resent.
+        if kind != "agenda":
             cited = {seq for issue in issues for seq in issue.source_seqs}
             if snapshot:
                 cited.update(seq for seqs in snapshot.source_map.values() for seq in seqs)
-            keep = set(cited)
-            keep.update(message.seq for message in messages[-24:] if message.kind == MessageKind.STANCE)
-            remaining = 16000
-            for message in reversed(messages[-24:]):
-                if message.seq not in keep and message.role != Role.USER and len(message.text) <= remaining:
-                    keep.add(message.seq)
-                    remaining -= len(message.text)
-            messages = [
-                message for message in messages if message.seq in keep or message.role == Role.USER
-            ]
+            messages = AgentExecution._select_context(session, messages, kind, topic_id, task, cited)
         visible = {m.seq for m in messages}
         request = RoleRequest(
             role=ROLE_ALIASES.get(role, role), kind=kind,
@@ -371,6 +377,34 @@ class AgentExecution:
                if allowed_roles is not None else {}),
         )
         return Job(request, role, kind, session.snapshot_ref, task)
+
+    @staticmethod
+    def _select_context(session, messages, kind, topic_id, task, cited):
+        current = [m for m in messages if m.input_version == session.input_version
+                   and m.kind != MessageKind.SYSTEM]
+        topic_history = [m for m in reversed(current) if m.topic_id == topic_id]
+        keep = cited | {m.seq for m in messages if m.kind == MessageKind.USER_INPUT}
+
+        # Reuse checkpoints in the same topic even after they leave the recent
+        # window. Required evidence stays citable without using the optional budget.
+        checkpoints = [
+            next((m for m in topic_history if m.role == Role.HOST and m.kind == MessageKind.DECISION
+                  and m.item_refs), None),
+            next((m for m in topic_history if m.kind == MessageKind.INTEGRATION), None),
+        ]
+        recent = current
+        if task and kind not in {"integration", "draft", "scoring"}:
+            dispatched = set(task.message_seqs)
+            recent = [m for m in current if m.seq in dispatched]
+            checkpoints.append(next((m for m in topic_history if m.role == task.role and m.round_no < task.round_no), None))
+
+        remaining = OPTIONAL_CONTEXT_CHARS
+        for message in (*checkpoints, *reversed(recent[-RECENT_CONTEXT_LIMIT:])):
+            if message is None or message.seq in keep or len(message.text) > remaining:
+                continue
+            keep.add(message.seq)
+            remaining -= len(message.text)
+        return [m for m in messages if m.seq in keep]
 
     @staticmethod
     def _message_analysis(message) -> dict | None:
@@ -419,12 +453,28 @@ class AgentExecution:
                 if key in output:
                     payload[key] = output[key]
             if task.kind == TaskKind.CHALLENGE:
-                payload["raised_issues"] = [{"issue_id": f"I-{task.round_no}-{task.task_id.rsplit(':', 1)[-1]}",
-                                             "topic_id": task.topic_id, "raised_by": job.role, "severity": "major",
-                                             "kind": output.get("divergence", "fact"),
-                                             "user_question": output.get("user_question"),
-                                             "summary": f"{output['text']} {output['verification']}",
-                                             "source_seqs": output["source_seqs"]}]
+                prefix = f"I-{task.round_no}-{task.task_id.rsplit(':', 1)[-1]}"
+                objections = output.get("objections") or [{
+                    "description": output["text"], "owner_role": output["target_roles"][0],
+                    "source_seqs": output["source_seqs"], "verification": output["verification"],
+                    "divergence": output.get("divergence", "fact"), "user_question": output.get("user_question"),
+                }]
+                payload["raised_issues"] = [
+                    {"issue_id": f"{prefix}-{index}" if output.get("objections") else prefix,
+                     "topic_id": task.topic_id, "raised_by": job.role, "severity": "major",
+                     "kind": item["divergence"], "user_question": item["user_question"],
+                     "summary": item["description"], "source_seqs": item["source_seqs"],
+                     "assignee": ENGINE_ROLES.get(item["owner_role"], item["owner_role"]),
+                     "closure_condition": item["verification"]}
+                    for index, item in enumerate(objections, 1)
+                ]
+                payload["source_seqs"] = list(dict.fromkeys([
+                    *payload["source_seqs"], *(seq for item in objections for seq in item["source_seqs"]),
+                ]))
+                if output.get("objections"):
+                    payload["text"] += "\n\n" + "\n".join(
+                        f"- {item['description']}（关闭条件：{item['verification']}）" for item in objections
+                    )
             elif task.kind == TaskKind.RESPONSE:
                 responses = output["responses"]
                 payload["issue_ids"] = [response["issue_id"] for response in responses]

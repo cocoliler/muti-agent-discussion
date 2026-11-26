@@ -13,15 +13,85 @@ from fastapi.testclient import TestClient
 
 from backend.discussions.routes import build_service, create_app
 from backend.discussions.agent_execution import AgentExecution
+from backend.discussions.codec import dump_session, load_session
 from backend.discussions.repository import LeaseLost
 from backend.roles.runner import RoleRunner
-from discussion_orchestration import SessionStatus, WaitingFor
+from discussion_orchestration import (
+    DiscussionSession, Issue, IssueStatus, Message, MessageKind, Phase, Role, RoundKind,
+    SessionStatus, Severity, SpeakerTask, TaskKind, WaitingFor,
+)
+from discussion_orchestration.models import IssueResponse
 from backend.roles.contracts import RoleRequest
 from backend.roles.provider import Completion, DeepSeekProvider, ProviderError
 from backend.roles.simulation import SimulationProvider
 
 
 class DiscussionAgentExecutionTest(unittest.TestCase):
+    def test_role_memory_recovers_checkpoints_and_issue_evidence_at_dispatch_boundary(self):
+        session = DiscussionSession("session", "project", input_version=3, round_no=4,
+                                    topic_id="T1", status=SessionStatus.DISCUSSING,
+                                    waiting_for=WaitingFor.ROLE_RESULTS)
+        session.messages = [
+            Message(1, Role.USER, MessageKind.USER_INPUT, "首版只覆盖总部", 1, 0),
+            Message(2, Role.USER, MessageKind.USER_INPUT, "目标用户是行政人员", 1, 1),
+            Message(3, Role.USER, MessageKind.USER_INPUT, "目标用户是研发人员", 2, 2, replaces_answer_seq=2),
+            Message(4, Role.PRODUCT, MessageKind.STATEMENT, "沿用行政人员流程", 2, 2, "T1"),
+            Message(5, Role.RECORDER, MessageKind.INTEGRATION, "统一预约校验规则", 3, 3, "T1",
+                    agreements=("统一预约校验规则",)),
+            Message(6, Role.ARCHITECT, MessageKind.STATEMENT, "以事务边界保证一致性", 3, 3, "T1"),
+            Message(7, Role.CHALLENGER, MessageKind.CHALLENGE, "事务失败时仍要释放名额", 3, 3, "T1"),
+            Message(8, Role.RECORDER, MessageKind.INTEGRATION, "另一个议题的结论", 3, 3, "T2"),
+            Message(9, Role.USER, MessageKind.USER_INPUT, "私人备注", 3, 4, substantive=False),
+            Message(10, Role.HOST, MessageKind.DECISION, "评分后采纳方案 A", 3, 3, "T1", item_refs=("A", "B")),
+        ]
+        session.messages.extend(Message(seq, Role.PRODUCT, MessageKind.STATEMENT, "详" * 2000, 3, 4, "T1")
+                                for seq in range(11, 50))
+        session.issues["I1"] = Issue("I1", "T1", Role.CHALLENGER, "核对名额回滚", Severity.BLOCKING,
+                                     source_seqs=(7,), assignee=Role.ARCHITECT, input_version=3)
+        session.tasks["respond"] = SpeakerTask(
+            "respond", session.session_id, Role.ARCHITECT, TaskKind.RESPONSE, Phase.RESPONSES,
+            RoundKind.DIRECTED, 4, "T1", session.snapshot_ref, 3, tuple(range(11, 50)), ("I1",),
+        )
+        expected, = AgentExecution()._jobs(session)
+        session.messages.append(Message(50, Role.DESIGNER, MessageKind.RESPONSE, "并行角色稍后提交", 3, 4, "T1"))
+        recovered, = AgentExecution()._jobs(load_session(dump_session(session)))
+        self.assertEqual(recovered.request, expected.request)
+        messages = recovered.request.messages
+        seqs = {message.seq for message in messages}
+        self.assertTrue({1, 3, 5, 6, 7, 10, 49} <= seqs)
+        self.assertTrue({2, 4, 8, 9, 50}.isdisjoint(seqs))
+        self.assertEqual(recovered.request.consensus, ["统一预约校验规则"])
+        self.assertEqual(recovered.request.issues[0].source_seqs, [7])
+        self.assertLessEqual(sum(len(message.text) for message in messages if message.seq not in {1, 3, 7}), 16000)
+
+    def test_integration_remembers_old_response_and_its_verification(self):
+        session = DiscussionSession("session", "project", round_no=3, topic_id="T1",
+                                    status=SessionStatus.DISCUSSING, waiting_for=WaitingFor.ROLE_RESULTS)
+        session.messages = [
+            Message(1, Role.USER, MessageKind.USER_INPUT, "预约会议室", 1, 0),
+            Message(2, Role.USER, MessageKind.DECISION, "补上预约冲突的提示", 1, 1, "T1"),
+            Message(3, Role.ARCHITECT, MessageKind.RESPONSE, "把冲突返回给发起人", 1, 2, "T1"),
+            Message(4, Role.RECORDER, MessageKind.INTEGRATION, "接受已有预约优先", 1, 2, "T1"),
+        ]
+        session.messages.extend(Message(seq, Role.PRODUCT, MessageKind.STATEMENT, "其他讨论", 1, 3, "T1")
+                                for seq in range(5, 45))
+        session.issues["I1"] = Issue(
+            "I1", "T1", Role.USER, "冲突提示", Severity.BLOCKING, source_seqs=(2,),
+            assignee=Role.ARCHITECT, status=IssueStatus.ANSWERED, response_seq=3,
+            response=IssueResponse("I1", "返回冲突状态", "同时提交两次预约并检查第二次收到提示", (2,)),
+        )
+        session.tasks["integrate"] = SpeakerTask(
+            "integrate", session.session_id, Role.RECORDER, TaskKind.INTEGRATION, Phase.INTEGRATION,
+            RoundKind.REVISION, 3, "T1", session.snapshot_ref, 1, tuple(range(5, 45)),
+        )
+        job, = AgentExecution()._jobs(session)
+        issue, = job.request.issues
+        self.assertEqual(issue.verification, "同时提交两次预约并检查第二次收到提示")
+        self.assertEqual(issue.source_seqs, [2, 3])
+        seqs = {message.seq for message in job.request.messages}
+        self.assertTrue({1, 2, 3, 4, 44} <= seqs)
+        self.assertNotIn(5, seqs)
+
     def advance_reviewed_revisions(self, client, path, *, max_returns=20):
         state = client.get(path).json()
         for _ in range(max_returns):
@@ -371,6 +441,61 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                     f"/api/v1/discussions/{session_id}/export").content.decode("utf-8"))
                 self.assertNotIn("scorecard_id", exported)
                 self.assertNotIn("chosen_option_id", exported)
+
+    def test_structured_objections_route_by_owner_and_grounded_stances_change_ranking(self):
+        complete = SimulationProvider.complete
+        requests = []
+
+        async def structured(provider, request, messages):
+            requests.append(request)
+            response = await complete(provider, request, messages)
+            output = json.loads(response.content)
+            evidence = next((m.seq for m in request.messages if m.role == "product"), request.messages[0].seq)
+            if request.kind == "challenge":
+                output = {"text": "并发处理与失败反馈需要分别验证。", "objections": [
+                    {"description": "并发时可能重复提交", "owner_role": "architect", "source_seqs": [evidence],
+                     "verification": "并发请求只产生一条记录"},
+                    {"description": "失败时缺少可见提示", "owner_role": "designer", "source_seqs": [evidence],
+                     "verification": "失败时可识别重试入口"},
+                    {"description": "首版选择同步还是异步", "owner_role": "product", "source_seqs": [evidence],
+                     "verification": "比较两种方案的风险", "divergence": "tradeoff"},
+                ]}
+            if request.kind == "scoring":
+                output["scorecard"]["options"] = [
+                    {"option_id": key, "title": title, "scores": {"user_value": 4, "feasibility": 4,
+                     "cost": 4, "differentiation": 4, "risk": risk}}
+                    for key, title, risk in [("A", "同步提交", 4), ("B", "异步登记", 4)]
+                ]
+            if request.kind == "stance" and request.role in {"architect", "designer"}:
+                output["stances"][0].update(position="oppose", score_dimension="risk", source_seqs=[evidence],
+                                             reason="同步提交的失败分支仍需控制重复记录和错误提示。")
+            return Completion(json.dumps(output), response.usage)
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(SimulationProvider, "complete", structured):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "名称：预约。用户：行政人员。目标：预约会议室。",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                self.assertEqual(created.status_code, 201, created.text)
+                path = f"/api/v1/discussions/{created.json()['id']}"
+                state = client.get(path).json()
+                self.assertEqual(state["status"], "awaiting_confirmation", state)
+                responses = {request.role: request.issues for request in requests if request.kind == "response"}
+                self.assertEqual(set(responses), {"architect", "designer"})
+                self.assertEqual(responses["architect"][0].closure_condition, "并发请求只产生一条记录")
+                self.assertEqual(responses["designer"][0].closure_condition, "失败时可识别重试入口")
+                review_inputs = [request for request in requests if request.kind == "draft"]
+                self.assertEqual({issue.owner_role for issue in review_inputs[-1].issues}, {"architect", "designer"})
+                stances = [request for request in requests if request.kind == "stance"]
+                self.assertTrue(all([issue.kind for issue in request.issues] == ["tradeoff"] for request in stances))
+                self.assertTrue(stances)
+                card = state["scorecard"]
+                self.assertEqual(card["chosen_option_id"], "B")
+                self.assertEqual(state["active_draft"]["chosen_option_id"], "B")
+                self.assertEqual({option["option_id"]: option["scores"]["risk"] for option in card["options"]}, {"A": 3, "B": 4})
+                self.assertIn("A 风险可控性 4→3", card["rationale"])
 
     def test_workers_claim_once_and_stale_worker_cannot_write(self):
         with TemporaryDirectory() as directory:

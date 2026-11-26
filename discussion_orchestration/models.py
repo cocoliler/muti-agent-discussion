@@ -132,6 +132,7 @@ class Issue:
     response_seq: int | None = None
     #: 问题所属的输入版本。输入版本升级后旧问题保留历史，但不再计入当前成稿门禁。
     input_version: int = 1
+    closure_condition: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,7 @@ class OptionStance:
     position: str
     reason: str
     source_seqs: tuple[int, ...] = ()
+    score_dimension: ScoreDimension | None = None
 
 
 @dataclass(frozen=True)

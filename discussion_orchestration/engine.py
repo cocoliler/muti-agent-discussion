@@ -26,6 +26,7 @@ from .enums import (
     ReasonCode,
     Role,
     RoundKind,
+    ScoreDimension,
     SessionStatus,
     Severity,
     TaskKind,
@@ -499,7 +500,7 @@ class DiscussionEngine:
         if task.kind == TaskKind.DRAFT:
             return self._finalize_draft(session, output, seq)
         if task.kind == TaskKind.SCORING:
-            return self._finalize_scoring(session, output, seq)
+            return self._finalize_scoring(session, task, output, seq)
         return self._advance_or_wait(session, task.phase)
 
     # ------------------------------------------------------------ 评审与签收
@@ -986,11 +987,17 @@ class DiscussionEngine:
                     ReasonCode.CHALLENGE_NEEDS_ISSUE,
                     "质疑者至少提出一条指向具体发言或用户输入的问题",
                 )
+            item = session.current_item()
+            new_ids: set[str] = set()
+            known = known_seqs(session)
             for issue in output.raised_issues:
                 if not issue.issue_id.strip():
                     return (ReasonCode.INVALID_ISSUE, "问题 ID 不能为空")
-                if issue.issue_id in session.issues:
+                if issue.issue_id in session.issues or issue.issue_id in new_ids:
                     return (ReasonCode.INVALID_ISSUE, f"问题 {issue.issue_id} 已存在")
+                new_ids.add(issue.issue_id)
+                if issue.assignee is not None and (not item or issue.assignee not in item.role_scope):
+                    return (ReasonCode.INVALID_ISSUE, "质疑点名角色不在当前议题范围内")
                 if issue.topic_id != task.topic_id:
                     return (ReasonCode.INVALID_ISSUE, "问题所属议题与当前议题不一致")
                 if not issue.summary.strip():
@@ -1000,7 +1007,6 @@ class DiscussionEngine:
                         ReasonCode.CHALLENGE_NEEDS_REFERENCE,
                         f"问题 {issue.issue_id} 必须引用具体发言或用户输入",
                     )
-                known = known_seqs(session)
                 for seq in issue.source_seqs:
                     if seq not in known:
                         return (
@@ -1060,6 +1066,10 @@ class DiscussionEngine:
                 problem = citation_problem(session, stance.source_seqs, None)
                 if problem:
                     return problem
+                if stance.score_dimension is not None and (
+                    not isinstance(stance.score_dimension, ScoreDimension) or stance.position == "support" or not stance.source_seqs
+                ):
+                    return (ReasonCode.INVALID_SCORECARD, "评分调整需要有引用依据的反对或有条件赞同")
             return None
 
         if task.kind == TaskKind.INTEGRATION:
@@ -1108,7 +1118,8 @@ class DiscussionEngine:
             for issue in output.raised_issues:
                 session.issues[issue.issue_id] = replace(
                     issue,
-                    assignee=None,
+                    assignee=issue.assignee if issue.kind == DivergenceKind.FACT else None,
+                    source_seqs=tuple(dict.fromkeys((*issue.source_seqs, seq))),
                     # 价值分歧不能靠角色互相说服，直接标记为待用户裁决。
                     needs_user=issue.kind == DivergenceKind.VALUE,
                     status=IssueStatus.OPEN,
@@ -1183,7 +1194,7 @@ class DiscussionEngine:
         )
 
     def _finalize_scoring(
-        self, session: DiscussionSession, output: SpeakerOutput, seq: int
+        self, session: DiscussionSession, task: SpeakerTask, output: SpeakerOutput, seq: int
     ) -> Decision:
         card = output.scorecard
         assert card is not None  # _validate_payload 已拦截
@@ -1207,6 +1218,7 @@ class DiscussionEngine:
                 round_kind=session.round_kind or RoundKind.FIRST, round_no=session.round_no,
                 topic_id=stored.topic_id, snapshot_ref=session.snapshot_ref,
                 input_version=session.input_version, message_seqs=message_seqs,
+                issue_ids=task.issue_ids,
             )
             for role in (item.required_roles if item else ())
         )
@@ -1223,8 +1235,29 @@ class DiscussionEngine:
         card = self._latest_scorecard(session)
         if card is None:
             return self._reject(session, ReasonCode.INVALID_SCORECARD, "当前议题缺少评分卡")
-        ranked = rank_options(card.options, card.weights)
-        stored = replace(card, chosen_option_id=ranked[0].option_id)
+        objections: dict[str, dict[ScoreDimension, set[int]]] = {}
+        for stances in card.stances.values():
+            for stance in stances:
+                if stance.score_dimension is not None:
+                    dimensions = objections.setdefault(stance.option_id, {})
+                    dimensions.setdefault(stance.score_dimension, set()).update(stance.source_seqs)
+        labels = {ScoreDimension.USER_VALUE: "用户价值", ScoreDimension.FEASIBILITY: "可行性",
+                  ScoreDimension.COST: "成本可控性", ScoreDimension.DIFFERENTIATION: "差异化", ScoreDimension.RISK: "风险可控性"}
+        options, changes, sources = [], [], set()
+        for option in card.options:
+            scores = dict(option.scores)
+            for dimension in ScoreDimension:
+                refs = objections.get(option.option_id, {}).get(dimension)
+                if refs and scores[dimension] > 0:
+                    scores[dimension] -= 1
+                    changes.append(f"{option.option_id} {labels[dimension]} {option.scores[dimension]}→{scores[dimension]}")
+                    sources.update(refs)
+            options.append(replace(option, scores=scores))
+        rationale = card.rationale
+        if changes:
+            rationale = " ".join(filter(None, (rationale, f"根据有依据的角色异议复核评分：{'、'.join(changes)}。")))
+        ranked = rank_options(tuple(options), card.weights)
+        stored = replace(card, options=tuple(options), rationale=rationale, chosen_option_id=ranked[0].option_id)
         session.scorecards[session.scorecards.index(card)] = stored
         session.chosen_option_id = stored.chosen_option_id
         ranking = "；".join(f"{item.rank}. {item.option_id}「{item.title}」{item.total:.2f}" for item in ranked)
@@ -1232,7 +1265,7 @@ class DiscussionEngine:
         if stored.rationale:
             text += f"依据：{stored.rationale}"
         decision = self._append(session, Role.HOST, MessageKind.DECISION, text,
-                                item_refs=tuple(item.option_id for item in ranked))
+                                item_refs=tuple(item.option_id for item in ranked), source_seqs=tuple(sorted(sources)))
         for issue in self._open_tradeoffs(session):
             issue.status = IssueStatus.CLOSED
             issue.closed_by_seq = decision.seq

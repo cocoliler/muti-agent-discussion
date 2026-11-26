@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, deleteDiscussion, discussionPath, readMessages } from './discussions';
 import type { Action, ClarificationAnswer, Decision, Finding, Handoff, Message, Session, Task } from './discussions';
 import { DiscussionSpec } from './DiscussionSpec';
@@ -73,6 +73,18 @@ function previousAnswers(text: string): ClarificationAnswer[] {
     : [{ question: '你想补充什么？', answer: text, options: [] }];
 }
 
+function distanceFromThreadBottom(list: HTMLDivElement) {
+  return list.scrollHeight - list.scrollTop - list.clientHeight;
+}
+
+function discussionRoundStarts(messages: Message[]) {
+  const starts = new Map<number, Message>();
+  for (const message of messages) {
+    if (message.round_no !== undefined && !starts.has(message.round_no)) starts.set(message.round_no, message);
+  }
+  return [...starts.entries()];
+}
+
 export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [id, setId] = useState(() => readStorage(storageKey));
   const [projectId, setProjectId] = useState(() => readStorage(projectKey) ?? crypto.randomUUID());
@@ -99,11 +111,31 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [payload, setPayload] = useState('');
   const [agendaDraft, setAgendaDraft] = useState<{ version: number; text: string } | null>(null);
   const thread = useRef<HTMLDivElement>(null);
+  const [canJumpToBottom, setCanJumpToBottom] = useState(false);
+  const [activeRound, setActiveRound] = useState<number | null>(null);
+  const roundStarts = useMemo(() => discussionRoundStarts(messages), [messages]);
   const projectIdeaField = useRef<HTMLTextAreaElement>(null);
   const sessionRead = useRef<AbortController | null>(null);
   const shouldScroll = useRef(true);
   const refresh = useRef<() => Promise<void>>(async () => {});
   const pending = useRef<{ signature: string; key: string } | null>(null);
+
+  const updateThreadPosition = useCallback((list: HTMLDivElement) => {
+    const distance = distanceFromThreadBottom(list);
+    setCanJumpToBottom(distance > 24);
+    if (distance < 2) {
+      setActiveRound(roundStarts.at(-1)?.[0] ?? null);
+      return;
+    }
+    const top = list.getBoundingClientRect().top + 28;
+    let visible = roundStarts[0]?.[0] ?? null;
+    for (const [round, message] of roundStarts) {
+      const target = document.getElementById(`message-${message.seq}`);
+      if (target && target.getBoundingClientRect().top > top) break;
+      if (target) visible = round;
+    }
+    setActiveRound(visible);
+  }, [roundStarts]);
 
   useEffect(() => {
     if (!id) return;
@@ -146,12 +178,23 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
 
   useEffect(() => {
     const list = thread.current;
-    if (!list || !shouldScroll.current) return;
-    const clarification = list.querySelector(':scope > .clarification-card:not([hidden])');
-    list.scrollTop = clarification
-      ? list.scrollTop + clarification.getBoundingClientRect().top - list.getBoundingClientRect().top - 12
-      : list.scrollHeight;
-  }, [messages.length]);
+    if (!list) return;
+    if (shouldScroll.current) {
+      const clarification = list.querySelector(':scope > .clarification-card:not([hidden])');
+      list.scrollTop = clarification
+        ? list.scrollTop + clarification.getBoundingClientRect().top - list.getBoundingClientRect().top - 12
+        : list.scrollHeight;
+    }
+    updateThreadPosition(list);
+  }, [messages.length, updateThreadPosition]);
+
+  useEffect(() => {
+    const list = thread.current;
+    if (!list) return;
+    const observer = new ResizeObserver(() => updateThreadPosition(list));
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [updateThreadPosition]);
 
   useEffect(() => {
     if (taskSelection && !taskDialog.current?.open) taskDialog.current?.showModal();
@@ -180,6 +223,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     setHighlight(null);
     setItemRef(null);
     shouldScroll.current = true;
+    setCanJumpToBottom(false);
+    setActiveRound(null);
     pending.current = null;
     if (!nextId) requestAnimationFrame(() => projectIdeaField.current?.focus());
   }
@@ -270,6 +315,26 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     const target = document.getElementById(`message-${seq}`);
     target?.focus({ preventScroll: true });
     target?.scrollIntoView({ block: 'nearest' });
+  }
+
+  function jumpToRound(seq: number) {
+    const list = thread.current;
+    const target = document.getElementById(`message-${seq}`);
+    if (!list || !target) return;
+    shouldScroll.current = false;
+    list.scrollTop += target.getBoundingClientRect().top - list.getBoundingClientRect().top - 12;
+    setHighlight(seq);
+    target.focus({ preventScroll: true });
+    updateThreadPosition(list);
+  }
+
+  function jumpToBottom() {
+    const list = thread.current;
+    if (!list) return;
+    shouldScroll.current = true;
+    list.scrollTop = list.scrollHeight;
+    list.focus({ preventScroll: true });
+    updateThreadPosition(list);
   }
 
   function editAction(type: Action | '', task?: Task) {
@@ -441,86 +506,100 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
                   aria-expanded={false} onClick={showSpec}>展开规格</button>
               : <a href="#live-spec-title">查看规格</a>}
           </div>}</header>
-        <div ref={thread} className="thread" aria-label="讨论消息" onScroll={(event) => {
-          const element = event.currentTarget;
-          shouldScroll.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
-        }}>
-          {id ? messages.map((message) => <article key={message.seq} id={`message-${message.seq}`} tabIndex={-1}
-            className={`message${highlight === message.seq ? ' highlight' : ''}`}>
-            <Avatar role={message.role} /><div className="message-body"><header><strong>{roleLabels[message.role] ?? message.role}</strong>
-              <span className="event-label">{supersededAnswers.has(message.seq) ? '答案已替换' : message.substantive === false ? '随手备注' : kindLabels[message.kind] ?? message.kind}</span><span className="sequence">#{message.seq}</span>
-              {editableAnswers.includes(message) && editMessage !== message && <button className="message-edit" disabled={busy}
-                onClick={() => reanswer(message.seq)}>修改回答</button>}
-            </header>
-              {session && editMessage === message ? <ClarificationForm
-                questions={editAnswers.map((answer) => answer.question)} initialAnswers={editAnswers}
-                options={Object.fromEntries(editAnswers.map((answer) => [answer.question, answer.options]))} busy={busy} error={error}
-                onCancel={() => {
-                  setError('');
-                  setAnswerToEdit(null);
-                  requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`#message-${message.seq} .message-edit`)?.focus());
-                }}
-                onSubmit={(text, answers) => command('/messages', {
-                  text, reply_to_seq: message.reply_to_seq, replaces_answer_seq: message.seq,
-                  clarification_answers: answers, substantive: true, input_version: session.input_version,
-                }, () => { setAnswerToEdit(null); shouldScroll.current = true; })} />
-              : <>{message.role === 'user' && !!session?.clarification_answers?.[message.seq]?.length
-                ? <div className="clarification-replies">{session.clarification_answers[message.seq].map((entry, index) => <div key={index}>
-                    <DiscussionMessageText text={entry.question} formatted />
-                    <p><strong>回答</strong> {entry.answer}</p>
-                  </div>)}</div>
-                : <DiscussionMessageText text={message.text} formatted={message.role !== 'user' && message.kind !== 'system'} />}
-                <div className="references">
-                {[...new Set([...(message.source_seqs ?? []), ...(message.reply_to_seq ? [message.reply_to_seq] : [])])].map((seq) =>
-                  <button key={seq} onClick={() => locate(seq)} aria-label={`定位消息 ${seq}`}>#{seq}</button>)}
-                {message.item_refs?.map((item) => <button key={item} onClick={() => showReference(item)}>{item}</button>)}
-                {message.issue_ids?.map((issue) => <span key={issue}>{issue}</span>)}
-                {session && !terminal && !paused && <button onClick={() => setReply(message.seq)}>回复 #{message.seq}</button>}
-              </div></>}
-            </div></article>) : <form className="welcome live-form" onSubmit={(event) => { event.preventDefault(); create(); }}>
-            <h2>你想做什么产品？</h2>
-            <label>项目想法<textarea ref={projectIdeaField} required maxLength={4000} rows={4} placeholder="例如：做一个内部会议室预约工具，首版支持查空闲和预约。" value={idea} onChange={(event) => setIdea(event.target.value)} /></label>
-            <details className="project-settings"><summary>项目设置</summary><label>项目 ID（UUID）<input value={projectId} onChange={(event) => setProjectId(event.target.value)} /></label></details>
-            <p className="model-disclosure">真实模型模式会将项目输入和任务所需的讨论内容发送给 DeepSeek。请勿填写密钥或未经授权的客户资料。</p>
-            <button className="primary" disabled={busy || !idea.trim() || !projectId.trim()}>创建讨论</button>
-          </form>}
-          {id && !session && !readError && <p role="status">正在恢复讨论…</p>}
-          {session && clarificationKey && <ClarificationForm key={clarificationKey}
-            questions={clarificationQuestions} options={session.clarification?.options} busy={busy} error={error} hidden={!!editMessage}
-            onSubmit={(answer, answers) => command('/messages', {
-              text: answer, reply_to_seq: clarificationSeq, substantive: true, input_version: session.input_version,
-              ...(session.superseded_answer_seqs && clarificationSeq ? { clarification_answers: answers } : {}),
-            })} />}
-          {session && nextStep && !clarificationKey && !editMessage && <section className="next-step" aria-labelledby="next-step-title">
-            <div className="next-step-heading"><span className="step-symbol" aria-hidden="true">{terminal ? '✓' : '↳'}</span><div>
-              <h2 id="next-step-title" role="status">{nextStep}</h2>
-              {agentsEnabled && (waitingForAgenda || autoExchange) && <p>{session.agent_mode === 'simulation' ? '模拟 Agent' : '模型 Agent'}生成的发言会自动显示在讨论中。</p>}
-              {failedAgent?.error_code === 'AGENT_NO_PROGRESS' && <p>这次执行没有推进待处理任务，已停止自动重复调用。</p>}
-              {failedAgent?.error_code === 'PROVIDER_CONFIG' && <p>请检查后端的 DeepSeek 密钥和模型名配置。</p>}
-              {failedAgent?.diagnostic && <p>{/^missing at (?:source_seqs|findings\/\d+\/source_seqs)$/.test(failedAgent.diagnostic)
-                ? `${roleLabels[failedAgent.role] ?? failedAgent.role}的输出缺少消息引用，重试会重新核对引用。`
-                : failedAgent.diagnostic.startsWith('requirement_changes')
-                  ? '记录员的需求变更记录未通过校验，重试会重新核对旧需求的去向。'
-                  : `输出校验失败：${failedAgent.diagnostic}`}</p>}
-              {session.waiting_for === 'role_results' && !paused && !autoExchange && <p>收到角色结果后，会显示在讨论中。</p>}
-            </div></div>
-            {!paused && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent ? '重试 Agent' : '继续执行 Agent'}</button>}
-            {session.status === 'awaiting_confirmation' && <a href="#live-spec-title" onClick={(event) => { event.preventDefault(); showSpec(); }}>查看待审阅规格</a>}
-            {waitingForAgenda && !agentsEnabled && <form className="live-form agenda-form" onSubmit={(event) => {
-              event.preventDefault();
-              startDiscussion();
+        <div className="thread-pane">
+          {id && roundStarts.some(([round]) => round > 0) && <nav className="round-nav" aria-label="聊天轮次">
+            {roundStarts.map(([round, message]) => {
+              const label = round === 0 ? '讨论开场' : `第 ${round} 轮`;
+              return <button key={round} type="button" aria-label={`跳到${label}`} title={label}
+                aria-controls="discussion-thread" aria-current={activeRound === round ? 'location' : undefined}
+                onClick={() => jumpToRound(message.seq)}><span aria-hidden="true">{round || '始'}</span></button>;
+            })}
+          </nav>}
+          <div ref={thread} id="discussion-thread" className="thread" role="region" aria-label="讨论消息" tabIndex={-1}
+            onScroll={(event) => {
+              const list = event.currentTarget;
+              shouldScroll.current = distanceFromThreadBottom(list) < 80;
+              updateThreadPosition(list);
             }}>
-              {editingAgenda || !latestIdea ? <label>要讨论什么？<textarea autoFocus={editingAgenda} required rows={2} maxLength={8000}
-                value={agendaText} onChange={(event) => setAgendaDraft({ version: session.input_version, text: event.target.value })} /></label>
-                : <p className="agenda-preview">{latestIdea}</p>}
-              <div className="action-row">
-                <button className="primary" disabled={busy || !agendaText.trim()}>开始讨论</button>
-                {latestIdea && (editingAgenda
-                  ? <button type="button" disabled={busy} onClick={() => setAgendaDraft(null)}>取消修改</button>
-                  : <button type="button" disabled={busy} onClick={() => setAgendaDraft({ version: session.input_version, text: latestIdea })}>修改议题</button>)}
-              </div>
+            {id ? messages.map((message) => <article key={message.seq} id={`message-${message.seq}`} tabIndex={-1}
+              className={`message${highlight === message.seq ? ' highlight' : ''}`}>
+              <Avatar role={message.role} /><div className="message-body"><header><strong>{roleLabels[message.role] ?? message.role}</strong>
+                <span className="event-label">{supersededAnswers.has(message.seq) ? '答案已替换' : message.substantive === false ? '随手备注' : kindLabels[message.kind] ?? message.kind}</span><span className="sequence">#{message.seq}</span>
+                {editableAnswers.includes(message) && editMessage !== message && <button className="message-edit" disabled={busy}
+                  onClick={() => reanswer(message.seq)}>修改回答</button>}
+              </header>
+                {session && editMessage === message ? <ClarificationForm
+                  questions={editAnswers.map((answer) => answer.question)} initialAnswers={editAnswers}
+                  options={Object.fromEntries(editAnswers.map((answer) => [answer.question, answer.options]))} busy={busy} error={error}
+                  onCancel={() => {
+                    setError('');
+                    setAnswerToEdit(null);
+                    requestAnimationFrame(() => document.querySelector<HTMLButtonElement>(`#message-${message.seq} .message-edit`)?.focus());
+                  }}
+                  onSubmit={(text, answers) => command('/messages', {
+                    text, reply_to_seq: message.reply_to_seq, replaces_answer_seq: message.seq,
+                    clarification_answers: answers, substantive: true, input_version: session.input_version,
+                  }, () => { setAnswerToEdit(null); shouldScroll.current = true; })} />
+                : <>{message.role === 'user' && !!session?.clarification_answers?.[message.seq]?.length
+                  ? <div className="clarification-replies">{session.clarification_answers[message.seq].map((entry, index) => <div key={index}>
+                      <DiscussionMessageText text={entry.question} formatted />
+                      <p><strong>回答</strong> {entry.answer}</p>
+                    </div>)}</div>
+                  : <DiscussionMessageText text={message.text} formatted={message.role !== 'user' && message.kind !== 'system'} />}
+                  <div className="references">
+                  {[...new Set([...(message.source_seqs ?? []), ...(message.reply_to_seq ? [message.reply_to_seq] : [])])].map((seq) =>
+                    <button key={seq} onClick={() => locate(seq)} aria-label={`定位消息 ${seq}`}>#{seq}</button>)}
+                  {message.item_refs?.map((item) => <button key={item} onClick={() => showReference(item)}>{item}</button>)}
+                  {message.issue_ids?.map((issue) => <span key={issue}>{issue}</span>)}
+                  {session && !terminal && !paused && <button onClick={() => setReply(message.seq)}>回复 #{message.seq}</button>}
+                </div></>}
+              </div></article>) : <form className="welcome live-form" onSubmit={(event) => { event.preventDefault(); create(); }}>
+              <h2>你想做什么产品？</h2>
+              <label>项目想法<textarea ref={projectIdeaField} required maxLength={4000} rows={4} placeholder="例如：做一个内部会议室预约工具，首版支持查空闲和预约。" value={idea} onChange={(event) => setIdea(event.target.value)} /></label>
+              <details className="project-settings"><summary>项目设置</summary><label>项目 ID（UUID）<input value={projectId} onChange={(event) => setProjectId(event.target.value)} /></label></details>
+              <p className="model-disclosure">真实模型模式会将项目输入和任务所需的讨论内容发送给 DeepSeek。请勿填写密钥或未经授权的客户资料。</p>
+              <button className="primary" disabled={busy || !idea.trim() || !projectId.trim()}>创建讨论</button>
             </form>}
-          </section>}
+            {id && !session && !readError && <p role="status">正在恢复讨论…</p>}
+            {session && clarificationKey && <ClarificationForm key={clarificationKey}
+              questions={clarificationQuestions} options={session.clarification?.options} busy={busy} error={error} hidden={!!editMessage}
+              onSubmit={(answer, answers) => command('/messages', {
+                text: answer, reply_to_seq: clarificationSeq, substantive: true, input_version: session.input_version,
+                ...(session.superseded_answer_seqs && clarificationSeq ? { clarification_answers: answers } : {}),
+              })} />}
+            {session && nextStep && !clarificationKey && !editMessage && <section className="next-step" aria-labelledby="next-step-title">
+              <div className="next-step-heading"><span className="step-symbol" aria-hidden="true">{terminal ? '✓' : '↳'}</span><div>
+                <h2 id="next-step-title" role="status">{nextStep}</h2>
+                {agentsEnabled && (waitingForAgenda || autoExchange) && <p>{session.agent_mode === 'simulation' ? '模拟 Agent' : '模型 Agent'}生成的发言会自动显示在讨论中。</p>}
+                {failedAgent?.error_code === 'AGENT_NO_PROGRESS' && <p>这次执行没有推进待处理任务，已停止自动重复调用。</p>}
+                {failedAgent?.error_code === 'PROVIDER_CONFIG' && <p>请检查后端的 DeepSeek 密钥和模型名配置。</p>}
+                {failedAgent?.diagnostic && <p>{/^missing at (?:source_seqs|findings\/\d+\/source_seqs)$/.test(failedAgent.diagnostic)
+                  ? `${roleLabels[failedAgent.role] ?? failedAgent.role}的输出缺少消息引用，重试会重新核对引用。`
+                  : failedAgent.diagnostic.startsWith('requirement_changes')
+                    ? '记录员的需求变更记录未通过校验，重试会重新核对旧需求的去向。'
+                    : `输出校验失败：${failedAgent.diagnostic}`}</p>}
+                {session.waiting_for === 'role_results' && !paused && !autoExchange && <p>收到角色结果后，会显示在讨论中。</p>}
+              </div></div>
+              {!paused && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent ? '重试 Agent' : '继续执行 Agent'}</button>}
+              {session.status === 'awaiting_confirmation' && <a href="#live-spec-title" onClick={(event) => { event.preventDefault(); showSpec(); }}>查看待审阅规格</a>}
+              {waitingForAgenda && !agentsEnabled && <form className="live-form agenda-form" onSubmit={(event) => {
+                event.preventDefault();
+                startDiscussion();
+              }}>
+                {editingAgenda || !latestIdea ? <label>要讨论什么？<textarea autoFocus={editingAgenda} required rows={2} maxLength={8000}
+                  value={agendaText} onChange={(event) => setAgendaDraft({ version: session.input_version, text: event.target.value })} /></label>
+                  : <p className="agenda-preview">{latestIdea}</p>}
+                <div className="action-row">
+                  <button className="primary" disabled={busy || !agendaText.trim()}>开始讨论</button>
+                  {latestIdea && (editingAgenda
+                    ? <button type="button" disabled={busy} onClick={() => setAgendaDraft(null)}>取消修改</button>
+                    : <button type="button" disabled={busy} onClick={() => setAgendaDraft({ version: session.input_version, text: latestIdea })}>修改议题</button>)}
+                </div>
+              </form>}
+            </section>}
+          </div>
+          {id && canJumpToBottom && <button type="button" className="jump-to-bottom" aria-label="跳到最新消息"
+            title="跳到最新消息" aria-controls="discussion-thread" onClick={jumpToBottom} />}
         </div>
         {((error && !clarificationKey && !editMessage) || readError || findings.length > 0) && <div className="error workbench-error" role="alert">
           {error && !clarificationKey && !editMessage && <p>{error}</p>}{readError && <p>{readError} {id && <button onClick={() => void refresh.current()}>重新读取</button>}</p>}
@@ -529,19 +608,33 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
           </li>)}</ul>}
         </div>}
         {session && !terminal && <footer className="workbench-controls">
-          {!paused && <form className="live-form" onSubmit={(event) => {
+          <form className="discussion-composer" onSubmit={(event) => {
             event.preventDefault();
+            if (paused || !text.trim()) return;
             command('/messages', { text: text.trim(), reply_to_seq: reply, substantive, input_version: session.input_version }, () => { setText(''); setReply(null); });
           }}>
-            {reply !== null && <div className="action-row"><button type="button" onClick={() => locate(reply)}>回复 #{reply}</button><button type="button" onClick={() => setReply(null)}>取消回复</button></div>}
-            <label>讨论消息<textarea rows={2} required maxLength={8000} value={text} onChange={(event) => setText(event.target.value)} /></label>
-            <div className="action-row spread"><label className="check"><input type="checkbox" checked={substantive} onChange={(event) => setSubstantive(event.target.checked)} /> 更新需求上下文</label>
-              <button className="primary" disabled={busy || !text.trim()}>发送</button></div>
-          </form>}
-          <div className="action-row">
-            <button disabled={busy} onClick={() => act(paused ? 'resume' : 'pause')}>{paused ? '恢复讨论' : '暂停讨论'}</button>
-            <button disabled={busy} onClick={() => { if (window.confirm('取消后，此会话将结束。')) act('cancel'); }}>取消讨论</button>
-          </div>
+            {!paused && <>
+              {reply !== null && <div className="composer-reply">
+                <button type="button" onClick={() => locate(reply)}>回复 #{reply}</button>
+                <button type="button" aria-label="取消回复" onClick={() => setReply(null)}>×</button>
+              </div>}
+              <textarea aria-label="讨论消息" placeholder="输入讨论消息…" rows={1} required maxLength={8000}
+                value={text} onChange={(event) => setText(event.target.value)} />
+            </>}
+            <div className="composer-toolbar">
+              {!paused && <label className="composer-context">
+                <input type="checkbox" checked={substantive} onChange={(event) => setSubstantive(event.target.checked)} />
+                更新需求上下文
+              </label>}
+              <div className="composer-actions">
+                <button type="button" disabled={busy} onClick={() => act(paused ? 'resume' : 'pause')}>{paused ? '恢复讨论' : '暂停讨论'}</button>
+                <button type="button" disabled={busy} onClick={() => { if (window.confirm('取消后，此会话将结束。')) act('cancel'); }}>取消讨论</button>
+              </div>
+              {!paused && <button type="submit" className="primary composer-send" aria-label="发送" title="发送" disabled={busy || !text.trim()}>
+                <span aria-hidden="true">↑</span>
+              </button>}
+            </div>
+          </form>
         </footer>}
       </main>
       <DiscussionSpec key={id} collapsed={specCollapsed} onCollapse={collapseSpec} session={session} handoff={handoff} locate={locate} itemRef={itemRef} busy={busy}

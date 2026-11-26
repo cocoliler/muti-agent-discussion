@@ -11,6 +11,7 @@ export type Message = {
   item_refs: string[];
   issue_ids: string[];
   input_version?: number;
+  round_no?: number;
   task_id?: string | null;
 };
 
