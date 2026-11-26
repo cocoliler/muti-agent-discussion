@@ -3,7 +3,7 @@ import { ApiError, api, deleteDiscussion, discussionPath, readMessages } from '.
 import type { Action, ClarificationAnswer, Decision, Finding, Handoff, Message, Session, Task } from './discussions';
 import { DiscussionSpec } from './DiscussionSpec';
 import { ClarificationForm } from './ClarificationForm';
-import { DiscussionMessageText } from './DiscussionMessageText';
+import { AgentMessageText, DiscussionMessageText } from './DiscussionMessageText';
 import { LocalDiscussionHistory } from './LocalDiscussionHistory';
 import './workbench.css';
 
@@ -35,7 +35,7 @@ const participantLabels: Record<string, string> = {
   pending: '待执行', ignored: '已忽略', abandoned: '已放弃', timed_out: '已超时',
 };
 const kindLabels: Record<string, string> = {
-  user_input: '用户输入', agenda: '议题', clarification: '澄清', statement: '发言', challenge: '质疑',
+  user_input: '用户输入', agenda: '议题', clarification: '澄清', statement: '角色建议', challenge: '质疑',
   response: '回应', stance: '方案立场', integration: '整合', draft: '草稿', review: '评审', decision: '决定', system: '系统',
 };
 const taskLabels = { ...kindLabels, statement: '专业角色发言', integration: '整合讨论结果', scoring: '方案比较与评分', draft: '撰写规格草稿' } as Record<string, string>;
@@ -65,6 +65,21 @@ function describeError(error: unknown) {
   return error instanceof Error ? error.message : '无法连接讨论服务。';
 }
 
+function describeAgentDiagnostic(role: string, diagnostic: string) {
+  if (diagnostic.includes('scorecard')) return '方案评分未通过校验，重试会检查方案编号和五个评分维度。';
+  if (/new_findings|reassessments|closed findings|account for all previous issues/.test(diagnostic)) {
+    return '评审记录未通过校验，重试会分开登记新问题和复核历史问题。';
+  }
+  if (diagnostic.startsWith('role output fields must match')) return '角色返回的内容与当前任务不匹配，重试会按本轮任务重新生成。';
+  if (diagnostic.includes('stances')) return '方案立场未通过校验，重试会逐项核对候选方案。';
+  if (diagnostic.includes('responses')) return '问题回应未通过校验，重试会逐条核对已指派的问题。';
+  if (/^missing at (?:source_seqs|findings\/\d+\/source_seqs)$/.test(diagnostic)) {
+    return `${roleLabels[role] ?? role}的输出缺少消息引用，重试会重新核对引用。`;
+  }
+  if (diagnostic.startsWith('requirement_changes')) return '记录员的需求变更记录未通过校验，重试会重新核对旧需求的去向。';
+  return `输出校验失败：${diagnostic}`;
+}
+
 function previousAnswers(text: string): ClarificationAnswer[] {
   const parts = text.trim().split(/\n\n(?=\d+\. )/);
   const parsed = parts.map((part) => /^\d+\. (.+?)\n回答：([\s\S]+)$/s.exec(part));
@@ -75,6 +90,10 @@ function previousAnswers(text: string): ClarificationAnswer[] {
 
 function distanceFromThreadBottom(list: HTMLDivElement) {
   return list.scrollHeight - list.scrollTop - list.clientHeight;
+}
+
+function usesAgentPreview(message: Message) {
+  return message.role !== 'user' && message.kind !== 'system' && message.kind !== 'clarification';
 }
 
 function discussionRoundStarts(messages: Message[]) {
@@ -317,6 +336,16 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     target?.scrollIntoView({ block: 'nearest' });
   }
 
+  function messageReferences(message: Message) {
+    const sources = [...new Set([...(message.source_seqs ?? []), ...(message.reply_to_seq ? [message.reply_to_seq] : [])])];
+    if (!sources.length && !message.item_refs?.length && !message.issue_ids?.length) return null;
+    return <div className="references">
+      {sources.map((seq) => <button key={seq} onClick={() => locate(seq)} aria-label={`定位消息 ${seq}`}>#{seq}</button>)}
+      {message.item_refs?.map((item) => <button key={item} onClick={() => showReference(item)}>{item}</button>)}
+      {message.issue_ids?.map((issue) => <span key={issue}>{issue}</span>)}
+    </div>;
+  }
+
   function jumpToRound(seq: number) {
     const list = thread.current;
     const target = document.getElementById(`message-${seq}`);
@@ -545,14 +574,12 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
                       <DiscussionMessageText text={entry.question} formatted />
                       <p><strong>回答</strong> {entry.answer}</p>
                     </div>)}</div>
-                  : <DiscussionMessageText text={message.text} formatted={message.role !== 'user' && message.kind !== 'system'} />}
-                  <div className="references">
-                  {[...new Set([...(message.source_seqs ?? []), ...(message.reply_to_seq ? [message.reply_to_seq] : [])])].map((seq) =>
-                    <button key={seq} onClick={() => locate(seq)} aria-label={`定位消息 ${seq}`}>#{seq}</button>)}
-                  {message.item_refs?.map((item) => <button key={item} onClick={() => showReference(item)}>{item}</button>)}
-                  {message.issue_ids?.map((issue) => <span key={issue}>{issue}</span>)}
-                  {session && !terminal && !paused && <button onClick={() => setReply(message.seq)}>回复 #{message.seq}</button>}
-                </div></>}
+                  : usesAgentPreview(message) ? <AgentMessageText text={message.text} plainSummary={message.plain_summary}
+                      references={messageReferences(message)} />
+                    : <DiscussionMessageText text={message.text} formatted={message.kind === 'clarification'} />}
+                  {!usesAgentPreview(message) && messageReferences(message)}
+                  {session && !terminal && !paused && <div className="references message-reply"><button onClick={() => setReply(message.seq)}>回复 #{message.seq}</button></div>}
+                </>}
               </div></article>) : <form className="welcome live-form" onSubmit={(event) => { event.preventDefault(); create(); }}>
               <h2>你想做什么产品？</h2>
               <label>项目想法<textarea ref={projectIdeaField} required maxLength={4000} rows={4} placeholder="例如：做一个内部会议室预约工具，首版支持查空闲和预约。" value={idea} onChange={(event) => setIdea(event.target.value)} /></label>
@@ -573,11 +600,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
                 {agentsEnabled && (waitingForAgenda || autoExchange) && <p>{session.agent_mode === 'simulation' ? '模拟 Agent' : '模型 Agent'}生成的发言会自动显示在讨论中。</p>}
                 {failedAgent?.error_code === 'AGENT_NO_PROGRESS' && <p>这次执行没有推进待处理任务，已停止自动重复调用。</p>}
                 {failedAgent?.error_code === 'PROVIDER_CONFIG' && <p>请检查后端的 DeepSeek 密钥和模型名配置。</p>}
-                {failedAgent?.diagnostic && <p>{/^missing at (?:source_seqs|findings\/\d+\/source_seqs)$/.test(failedAgent.diagnostic)
-                  ? `${roleLabels[failedAgent.role] ?? failedAgent.role}的输出缺少消息引用，重试会重新核对引用。`
-                  : failedAgent.diagnostic.startsWith('requirement_changes')
-                    ? '记录员的需求变更记录未通过校验，重试会重新核对旧需求的去向。'
-                    : `输出校验失败：${failedAgent.diagnostic}`}</p>}
+                {failedAgent?.diagnostic && <p>{describeAgentDiagnostic(failedAgent.role, failedAgent.diagnostic)}</p>}
                 {session.waiting_for === 'role_results' && !paused && !autoExchange && <p>收到角色结果后，会显示在讨论中。</p>}
               </div></div>
               {!paused && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent ? '重试 Agent' : '继续执行 Agent'}</button>}

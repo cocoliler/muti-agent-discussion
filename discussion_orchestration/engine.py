@@ -192,7 +192,8 @@ class DiscussionEngine:
         session.agenda = agenda
         lead = agenda.items[0]
         self._append(
-            session, Role.HOST, MessageKind.AGENDA, agenda.summary, topic_id=lead.topic_id
+            session, Role.HOST, MessageKind.AGENDA, agenda.summary, topic_id=lead.topic_id,
+            plain_summary=agenda.plain_summary,
         )
         if agenda.missing_facts:
             questions = "；".join(agenda.missing_facts)
@@ -491,6 +492,7 @@ class DiscussionEngine:
             issue_ids=output.issue_ids
             or tuple(issue.issue_id for issue in output.raised_issues),
             task_id=task.task_id,
+            plain_summary=output.plain_summary,
             output=output,
         ).seq
         session.tasks.pop(task.task_id, None)
@@ -559,6 +561,7 @@ class DiscussionEngine:
                 Role.REVIEWER,
                 MessageKind.REVIEW,
                 self._review_text(review, draft),
+                plain_summary=review.plain_summary,
                 item_refs=tuple(f.target_item for f in review.findings),
             )
             self._transition(session, SessionStatus.AWAITING_CONFIRMATION)
@@ -582,6 +585,7 @@ class DiscussionEngine:
                 Role.REVIEWER,
                 MessageKind.REVIEW,
                 self._review_text(review, draft),
+                plain_summary=review.plain_summary,
                 item_refs=tuple(f.target_item for f in review.findings),
             )
             self._transition(session, SessionStatus.CLARIFYING)
@@ -632,6 +636,7 @@ class DiscussionEngine:
             Role.REVIEWER,
             MessageKind.REVIEW,
             self._review_text(review, draft),
+            plain_summary=review.plain_summary,
             item_refs=tuple(f.target_item for f in review.findings),
         )
         self._transition(session, SessionStatus.AWAITING_CONFIRMATION)
@@ -1265,6 +1270,7 @@ class DiscussionEngine:
         if stored.rationale:
             text += f"依据：{stored.rationale}"
         decision = self._append(session, Role.HOST, MessageKind.DECISION, text,
+                                plain_summary=f"本轮暂选「{ranked[0].title}」。",
                                 item_refs=tuple(item.option_id for item in ranked), source_seqs=tuple(sorted(sources)))
         for issue in self._open_tradeoffs(session):
             issue.status = IssueStatus.CLOSED
@@ -1505,6 +1511,7 @@ class DiscussionEngine:
         clarification_answers: tuple[ClarificationAnswer, ...] = (),
         replaces_answer_seq: int | None = None,
         substantive: bool = True,
+        plain_summary: str | None = None,
         output: SpeakerOutput | None = None,
     ) -> Message:
         message = Message(
@@ -1524,6 +1531,7 @@ class DiscussionEngine:
             clarification_answers=clarification_answers,
             replaces_answer_seq=replaces_answer_seq,
             substantive=substantive,
+            plain_summary=plain_summary,
             **({key: getattr(output, key) for key in (
                 "basis", "verification", "agreements", "alternatives", "disagreements", "assumptions", "risks",
             )} if output is not None else {}),

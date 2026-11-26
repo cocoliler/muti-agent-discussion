@@ -165,6 +165,11 @@
 .discussion-message-text ul, .discussion-message-text ol { margin: 4px 0 6px; padding-inline-start: 20px; }
 .discussion-message-text li { padding-inline-start: 2px; overflow-wrap: anywhere; }
 .discussion-message-text li + li { margin-top: 2px; }
+.workbench-shell .agent-message-preview { white-space: normal; }
+.agent-message-details { margin-top: 8px; }
+.agent-message-details[open] { padding-inline-start: 10px; border-inline-start: 2px solid var(--border); }
+.agent-message-details[open] > summary { margin-bottom: 8px; }
+.message-reply { margin-top: 7px; }
 .workbench-shell .event-label { background: var(--raised); color: var(--muted); }
 .workbench-shell .references button { background: var(--raised); color: var(--accent); }
 .workbench-shell .highlight { outline-color: var(--focus); }

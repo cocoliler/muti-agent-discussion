@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 const headings = [
   '首版架构建议', '架构建议', '首版范围', '核心建议', '主要建议', '建议', '结论', '优先级',
   '成本假设', '成本估算', '技术约束', '主要约束', '关键约束', '依赖', '故障场景', '失败场景',
@@ -77,4 +79,33 @@ export function DiscussionMessageText({ text, formatted }: { text: string; forma
       return <List key={index}>{lines.map((line, lineIndex) => <li key={lineIndex} value={line.number}>{formatInlineText(line.text)}</li>)}</List>;
     })}
   </div>)}</div>;
+}
+
+export function AgentMessageText({ text, plainSummary, references }: {
+  text: string;
+  plainSummary?: string | null;
+  references?: ReactNode;
+}) {
+  const clean = text.trim();
+  const summary = plainSummary?.trim();
+  if ((!summary || summary === clean) && clean.length <= 160 && !references) {
+    return <DiscussionMessageText text={text} formatted />;
+  }
+  const opening = (sections(clean)[0]?.text.trim() || clean).replace(/\*\*/g, '');
+  const firstLine = opening.split(/\r?\n/)[0];
+  const firstSentence = firstLine.match(/^.+?(?:[。！？!?]|\.(?=\s|$))/)?.[0] ?? firstLine;
+  const picked = /^收敛评分：[\s\S]*?。采纳 ([^。]+)。/.exec(clean)?.[1];
+  const pickedTitle = picked && clean.split(picked + '「')[1]?.split('」')[0];
+  const preview = summary || (pickedTitle ? `本轮暂选「${pickedTitle}」。` : clean.length <= 160 ? clean : firstSentence);
+  const limit = Array.from(preview);
+  const excerpt = limit.length > 160 ? limit.slice(0, 157).join('') + '…' : preview;
+  const hasMoreText = excerpt !== clean;
+  return <>
+    <p className="agent-message-preview">{formatInlineText(excerpt)}</p>
+    {(hasMoreText || references) && <details className="agent-message-details">
+      <summary>{hasMoreText ? '查看发言详情' : '查看引用与关联'}</summary>
+      {hasMoreText && <DiscussionMessageText text={text} formatted />}
+      {references}
+    </details>}
+  </>;
 }

@@ -435,11 +435,12 @@ class AgentExecution:
             payload = {"review_id": request.logical_task_id, "session_id": request.session_id,
                        "draft_id": output["draft_id"], "input_version": request.input_version,
                        "verdict": output["verdict"].lower(), "questions": output["questions"],
+                       "plain_summary": output.get("plain_summary"),
                        "question_options": output.get("question_options", {}),
                        "findings": findings["open"], "verified_findings": findings["closed"]}
             action = "submit_review"
         elif task is None:
-            payload = {"summary": output["text"], "items": [{"topic_id": request.topic_id,
+            payload = {"summary": output["text"], "plain_summary": output.get("plain_summary"), "items": [{"topic_id": request.topic_id,
                        "title": request.user_input.splitlines()[0][:80],
                        "question": "首版应该解决哪些用户需求与关键约束？"}],
                        "missing_facts": output["questions"], "question_options": output.get("question_options", {})}
@@ -449,7 +450,7 @@ class AgentExecution:
                        "input_version": task.input_version, "snapshot_ref": task.snapshot_ref,
                        "round_no": task.round_no, "topic_id": task.topic_id, "text": output["text"],
                        "source_seqs": output["source_seqs"]}
-            for key in ("basis", "verification", "agreements", "alternatives", "disagreements", "assumptions", "risks"):
+            for key in ("basis", "verification", "agreements", "alternatives", "disagreements", "assumptions", "risks", "plain_summary"):
                 if key in output:
                     payload[key] = output[key]
             if task.kind == TaskKind.CHALLENGE:

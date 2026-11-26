@@ -27,6 +27,20 @@ class Fake:
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scoring_retries_missing_dimensions_before_submission(self):
+        scores = dict(user_value=4, feasibility=3, cost=3, differentiation=2, risk=4)
+        card = dict(text="比较方案", source_seqs=[], action="SCORE", topic_id="scope", scorecard={"options": [
+            dict(option_id="A", title="方案 A", scores={key: value for key, value in scores.items() if key != "risk"}),
+            dict(option_id="B", title="方案 B", scores=scores),
+        ]})
+        bad = Completion(json.dumps(card))
+        card["scorecard"]["options"][0]["scores"] = scores
+        provider = Fake(bad, Completion(json.dumps(card)))
+        result = await RoleRunner("s", provider, mode="real").run(request(role="host", kind="scoring"))
+        self.assertIsNone(result.error)
+        self.assertEqual(result.attempts[0].diagnostic, "missing at scorecard/options/0/scores/risk")
+        self.assertEqual(provider.calls, 2)
+
     async def test_research_can_correct_a_missing_or_out_of_scope_source(self):
         bad = {"text": "建议核实", "basis": "evidence", "source_seqs": [17]}
         good = {"text": "建议核实", "basis": "assumption", "source_seqs": []}

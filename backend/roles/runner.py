@@ -9,7 +9,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ValidationError
 
-from .contracts import Finding, OUTPUT_MODELS, RoleRequest, RoleRuleError, build_messages, validate_output
+from .contracts import Finding, NewFinding, OptionScoreInput, OptionScores, Reassessment, RoleRequest, RoleRuleError, build_messages, output_model, validate_output
 from .provider import Completion, ProviderError
 
 
@@ -123,12 +123,22 @@ class RoleRunner:
                         first = exc.errors(include_input=False, include_context=False)[0]
                         diagnostic = first["type"]
                         location = first["loc"]
-                        if location and location[0] in OUTPUT_MODELS[request.role].model_fields:
+                        legacy_finding = request.role == "reviewer" and location and location[0] == "findings"
+                        if location and (location[0] in output_model(request).model_fields or legacy_finding):
                             diagnostic += " at " + location[0]
-                            if request.role == "reviewer" and location[0] == "findings" and len(location) >= 3:
+                            review_fields = {"findings": Finding, "new_findings": NewFinding, "reassessments": Reassessment}
+                            if request.role == "reviewer" and location[0] in review_fields and len(location) >= 3:
                                 index, field = location[1:3]
-                                if isinstance(index, int) and field in Finding.model_fields:
+                                if isinstance(index, int) and field in review_fields[location[0]].model_fields:
                                     diagnostic += f"/{index}/{field}"
+                            if request.kind == "scoring" and location[:2] == ("scorecard", "options"):
+                                diagnostic += "/options"
+                                if len(location) > 2 and isinstance(location[2], int):
+                                    diagnostic += f"/{location[2]}"
+                                    if len(location) > 3 and location[3] in OptionScoreInput.model_fields:
+                                        diagnostic += f"/{location[3]}"
+                                        if location[3] == "scores" and len(location) > 4 and location[4] in OptionScores.model_fields:
+                                            diagnostic += f"/{location[4]}"
                     except RoleRuleError as exc:
                         error, diagnostic = "invalid_output", str(exc)
                     except json.JSONDecodeError as exc:

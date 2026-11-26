@@ -66,6 +66,30 @@ class RoleContractTests(unittest.TestCase):
                 "stances": [{"option_id": "A", "position": "conditional", "reason": "需验证"}],
             })
 
+    def test_specialist_tasks_use_only_the_assigned_structured_field(self):
+        candidates = [{"option_id": key, "title": f"方案 {key}"} for key in ("A", "B")]
+        stances = [dict(option_id=key, position="conditional", reason="需复核边界", source_seqs=[7]) for key in ("A", "B")]
+        responses = [dict(issue_id="I-2", treatment="检查写入状态", verification="比较记录数", source_seqs=[7])]
+        base = dict(text="检查并发", basis="evidence")
+        agents = ("product", "research", "architect", "designer", "market")
+        for role in agents:
+            for kind, required, unrelated, items in (
+                ("stance", "stances", "responses", stances), ("response", "responses", "stances", responses),
+            ):
+                with self.subTest(role=role, kind=kind):
+                    req = task(role, kind=kind, issues=[dict(issue(), owner_role=role if kind == "response" else "scribe")],
+                               candidate_options=candidates if kind == "stance" else [])
+                    schema = json.loads(build_messages(req)[0]["content"].splitlines()[-1])
+                    self.assertIn(required, schema["required"])
+                    self.assertNotIn(unrelated, schema["properties"])
+                    result = self.check(req, {**base, required: items, unrelated: [{"source_seqs": [999]}]}).model_dump()
+                    self.assertEqual(result["source_seqs"], [7])
+                    self.assertNotIn(unrelated, result)
+                    with self.assertRaisesRegex(ValueError, required):
+                        self.check(req, {**base, "source_seqs": [7], unrelated: items})
+                    with self.assertRaisesRegex(RoleRuleError, required):
+                        self.check(req, {**base, "source_seqs": [7], required: [dict(items[0], source_seqs=[999])] + items[1:]})
+
     def test_request_rejects_cross_session_future_or_ambiguous_sources(self):
         for messages in ([message(session_id="other")], [message(input_version=3)], [message(), message()]):
             with self.subTest(messages=messages), self.assertRaises(ValueError):
@@ -208,6 +232,26 @@ class RoleContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RoleRuleError, "unknown draft item"):
             self.check(req, review(findings=[finding, dict(finding, issue_id="I-3", status="open")]))
 
+    def test_split_review_preserves_original_metadata_and_only_closes_registered_issues(self):
+        req = task("reviewer", kind="review", draft=frozen(), issues=[issue()])
+        result = review()
+        del result["findings"]
+        prior = dict(issue_id="I-2", status="closed", description="两次提交结果可以核对。", source_seqs=[7])
+        new = dict(issue(), issue_id="I-3", severity="advisory", source_seqs=[7])
+        output = self.check(req, dict(result, new_findings=[new], reassessments=[prior]))
+        self.assertEqual([(finding.issue_id, finding.status) for finding in output.findings], [("I-3", "open"), ("I-2", "closed")])
+        self.assertEqual(output.findings[1].closure_condition, issue()["closure_condition"])
+        self.assertEqual(output.findings[1].owner_role, issue()["owner_role"])
+        schema = json.loads(build_messages(req)[0]["content"].splitlines()[-1])
+        self.assertNotIn("status", schema["$defs"]["NewFinding"]["properties"])
+        self.assertEqual(schema["$defs"]["Reassessment"]["properties"]["issue_id"]["enum"], ["I-2"])
+        with self.assertRaisesRegex(RoleRuleError, "must match a tracked issue"):
+            self.check(req, dict(result, new_findings=[new], reassessments=[dict(prior, issue_id="unknown")]))
+        with self.assertRaisesRegex(RoleRuleError, "already tracked"):
+            self.check(req, dict(result, new_findings=[dict(new, issue_id="I-2")], reassessments=[prior]))
+        with self.assertRaisesRegex(RoleRuleError, "all previous issues"):
+            self.check(req, dict(result, new_findings=[new], reassessments=[]))
+
     def test_new_user_input_can_update_old_parent_but_removed_ids_need_a_change_record(self):
         parent = dict(frozen(), input_version=1)
         req = task("scribe", draft=parent)
@@ -225,13 +269,17 @@ class RoleContractTests(unittest.TestCase):
         base = dict(text="整合规格。", source_seqs=[7], agreements=[], alternatives=[], disagreements=[], assumptions=[], risks=[])
         orphan = dict(previous_id="FR-99", replacement_ids=["FR-01"], reason="误引用了更早的草稿。")
         with_parent = {**base, "content": SPEC, "source_map": frozen()["source_map"], "requirement_changes": [orphan]}
-        self.assertEqual(self.check(task("scribe", kind="integration", draft=frozen()), with_parent).requirement_changes, [])
+        integration = task("scribe", kind="integration", draft=frozen())
+        summary = self.check(integration, dict(with_parent, source_map={"wrong-id": [99]})).model_dump(exclude_none=True)
+        self.assertEqual(summary, base)
+        schema = json.loads(build_messages(integration)[0]["content"].splitlines()[-1])
+        self.assertTrue({"content", "source_map", "requirement_changes"}.isdisjoint(schema["properties"]))
         self.assertEqual(self.check(task("scribe", kind="draft", draft=frozen()), with_parent).requirement_changes, [])
         rebuilt = task("scribe", kind="draft", previous_requirement_ids=["FR-01", "FR-02"])
         self.assertIsNone(rebuilt.draft)
         self.assertIn('["FR-01", "FR-02"]', build_messages(rebuilt)[0]["content"])
         trimmed = {**with_parent, "content": dict(SPEC, requirements=SPEC["requirements"][:1]), "source_map": {"FR-01": [7]}}
-        self.assertEqual(self.check(task("scribe", kind="integration"), trimmed).requirement_changes, [])
+        self.assertEqual(self.check(task("scribe", kind="integration"), trimmed).model_dump(exclude_none=True), base)
         with self.assertRaisesRegex(RoleRuleError, "Missing previous IDs .*FR-02"):
             self.check(rebuilt, trimmed)
         actual = dict(previous_id="FR-02", replacement_ids=["FR-01"], reason="已合并到首条需求。")

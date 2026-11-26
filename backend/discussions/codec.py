@@ -282,7 +282,7 @@ def dump_message_row(message: Any, session_id: str, created_at: str) -> tuple:
         created_at,
         json.dumps({
             key: value for key in (
-                "basis", "verification", "agreements", "alternatives", "disagreements", "assumptions", "risks",
+                "basis", "verification", "agreements", "alternatives", "disagreements", "assumptions", "risks", "plain_summary",
             ) if (value := getattr(message, key, None))
         } | ({"substantive": False} if getattr(message, "substantive", True) is False else {}), ensure_ascii=False),
     )

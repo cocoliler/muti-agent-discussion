@@ -69,6 +69,7 @@ class MessageView(_Strict):
     role: str
     kind: str
     text: str
+    plain_summary: str | None = None
     topic_id: str | None = None
     task_id: str | None = None
     reply_to_seq: int | None = None

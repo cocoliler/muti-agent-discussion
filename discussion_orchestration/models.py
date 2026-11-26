@@ -59,6 +59,7 @@ class Agenda:
     items: tuple[AgendaItem, ...]
     missing_facts: tuple[str, ...] = ()
     question_options: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    plain_summary: str | None = None
 
     def item(self, topic_id: str) -> AgendaItem:
         for item in self.items:
@@ -101,6 +102,7 @@ class Message:
     disagreements: tuple[str, ...] = ()
     assumptions: tuple[str, ...] = ()
     risks: tuple[str, ...] = ()
+    plain_summary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -219,6 +221,7 @@ class SpeakerOutput:
     risks: tuple[str, ...] = ()
     #: 评分任务的结果；其他任务为空。
     scorecard: Scorecard | None = None
+    plain_summary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -248,6 +251,7 @@ class ReviewResult:
     questions: tuple[str, ...] = ()
     question_options: dict[str, tuple[str, ...]] = field(default_factory=dict)
     verified_findings: tuple[ReviewFinding, ...] = ()
+    plain_summary: str | None = None
 
 
 @dataclass

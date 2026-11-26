@@ -88,7 +88,7 @@ def _specialist(req):
     text, basis = ADVICE[req.role].format(goal), "assumption"
     if req.role == "market" and re.search(r"内部工具|内部使用|internal tool", req.user_input, re.I):
         text, basis = f"「{goal}」面向内部使用，本轮不讨论外部定价；可通过试用记录比较完成时间。", "not_applicable"
-    directed = [i for i in req.issues if i.owner_role == req.role]
+    directed = [i for i in req.issues if i.owner_role == req.role] if req.kind == "response" else []
     if directed:
         text += " 本轮验证：" + "；".join(f"{i.issue_id}（{i.target_item}）：{i.closure_condition}" for i in directed)
     elif message and message.role == "critic":
@@ -205,6 +205,14 @@ def _supporting_messages(req, item, allowed):
 
 
 def _scribe(req):
+    if req.kind == "integration":
+        critic = _latest(req, {"critic"})
+        if not req.messages:
+            raise ProviderError("insufficient_context")
+        return dict(text=f"已整理「{_goal(req)}」的讨论结论与待验证问题。",
+                    source_seqs=[m.seq for m in req.messages], agreements=list(req.consensus),
+                    alternatives=[], disagreements=[issue.description for issue in req.issues if not issue.treatment],
+                    assumptions=[], risks=[critic.text] if critic else [])
     if req.draft:
         spec, mapping = deepcopy(req.draft.content), deepcopy(req.draft.source_map)
     else:

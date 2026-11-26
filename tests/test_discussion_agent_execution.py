@@ -120,8 +120,7 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
             if len(prompts) > 2:
                 return response
             output = json.loads(response.content)
-            source_map = output["source_map"]
-            source_map["private-model-value"] = source_map.pop(output["content"]["requirements"][0]["id"])
+            output["source_seqs"] = [max(m.seq for m in request.messages) + 1]
             return Completion(json.dumps(output), response.usage)
 
         with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
@@ -138,9 +137,7 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 attempts = [r for r in service.repo.list_attempts(session_id) if r["task_kind"] == "integration"]
                 self.assertEqual([a["status"] for a in attempts], ["FAILED", "FAILED"])
                 diagnostic = attempts[0]["error"]["diagnostic"]
-                self.assertIn("Missing keys for content.requirements indices [0]", diagnostic)
-                self.assertIn("extra source_map key indices", diagnostic)
-                self.assertNotIn("private-model-value", diagnostic)
+                self.assertIn("source_seqs outside the task snapshot", diagnostic)
                 retry = client.post(f"{path}/actions", headers={"Idempotency-Key": str(uuid4())}, json={
                     "type": "run_agents", "expected_state_version": state["state_version"],
                 })
@@ -445,8 +442,11 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
     def test_structured_objections_route_by_owner_and_grounded_stances_change_ranking(self):
         complete = SimulationProvider.complete
         requests = []
+        score_attempts = 0
+        review_attempts = 0
 
         async def structured(provider, request, messages):
+            nonlocal score_attempts, review_attempts
             requests.append(request)
             response = await complete(provider, request, messages)
             output = json.loads(response.content)
@@ -466,9 +466,27 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                      "cost": 4, "differentiation": 4, "risk": risk}}
                     for key, title, risk in [("A", "同步提交", 4), ("B", "异步登记", 4)]
                 ]
-            if request.kind == "stance" and request.role in {"architect", "designer"}:
-                output["stances"][0].update(position="oppose", score_dimension="risk", source_seqs=[evidence],
-                                             reason="同步提交的失败分支仍需控制重复记录和错误提示。")
+                score_attempts += 1
+                if score_attempts == 1:
+                    output["scorecard"]["options"][1]["option_id"] = "A"
+            if request.kind == "review":
+                review_attempts += 1
+                output["new_findings"] = [
+                    {key: value for key, value in finding.items() if key != "status"}
+                    for finding in output.pop("findings")
+                ]
+                output["reassessments"] = []
+                if review_attempts == 1:
+                    output["reassessments"] = [{"issue_id": "untracked", "status": "closed",
+                                                "description": "尚未登记", "source_seqs": [evidence]}]
+            if request.kind == "stance":
+                output["responses"] = [{"issue_id": request.issues[0].issue_id, "treatment": "额外回应",
+                                        "verification": "额外验证", "source_seqs": [evidence]}]
+                if request.role in {"architect", "designer"}:
+                    output["stances"][0].update(position="oppose", score_dimension="risk", source_seqs=[evidence],
+                                                 reason="同步提交的失败分支仍需控制重复记录和错误提示。")
+            if request.kind in {"agenda", "stance", "review"}:
+                output["plain_summary"] = "先说清楚用户会看到什么。"
             return Completion(json.dumps(output), response.usage)
 
         with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
@@ -482,6 +500,14 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 path = f"/api/v1/discussions/{created.json()['id']}"
                 state = client.get(path).json()
                 self.assertEqual(state["status"], "awaiting_confirmation", state)
+                self.assertEqual(score_attempts, 2)
+                self.assertEqual(review_attempts, 2)
+                messages = client.get(f"{path}/messages?limit=100").json()["items"]
+                for kind in ("agenda", "stance", "review"):
+                    selected = [message for message in messages if message["kind"] == kind]
+                    self.assertTrue(selected)
+                    self.assertTrue(all(message["plain_summary"] == "先说清楚用户会看到什么。" for message in selected))
+                    self.assertTrue(all(message["text"] != message["plain_summary"] for message in selected))
                 responses = {request.role: request.issues for request in requests if request.kind == "response"}
                 self.assertEqual(set(responses), {"architect", "designer"})
                 self.assertEqual(responses["architect"][0].closure_condition, "并发请求只产生一条记录")
@@ -619,7 +645,7 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
         async def extended_revision(provider, request, messages):
             response = await complete(provider, request, messages)
             output = json.loads(response.content)
-            if request.role == "scribe" and request.draft:
+            if request.kind == "draft" and request.draft:
                 output["content"]["requirements"][0]["acceptance_criteria"].append(
                     f"并发上限为 {request.draft.revision + 1} 时，返回明确的受理结果。"
                 )

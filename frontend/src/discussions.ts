@@ -6,6 +6,7 @@ export type Message = {
   kind: string;
   substantive?: boolean;
   text: string;
+  plain_summary?: string | null;
   reply_to_seq: number | null;
   source_seqs: number[];
   item_refs: string[];
