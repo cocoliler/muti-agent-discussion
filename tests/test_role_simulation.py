@@ -29,12 +29,12 @@ class SimulationTests(unittest.IsolatedAsyncioTestCase):
     def prior_issues(self, review):
         return [{k: v for k, v in f.items() if k != "status"} for f in review["findings"]]
 
-    async def test_fixture_and_five_specialists_respond_to_idea_deterministically(self):
+    async def test_fixture_and_three_specialists_respond_to_idea_deterministically(self):
         agenda = await self.run_role("host")
         self.assertEqual(agenda["action"], "DISCUSS")
         self.assertEqual(agenda, await self.run_role("host"))
         opinions = [await self.run_role(role) for role in agenda["target_roles"]]
-        self.assertEqual(len({op["text"] for op in opinions}), 5)
+        self.assertEqual(len({op["text"] for op in opinions}), 3)
         for op in opinions:
             self.assertIn("可借器材", op["text"])
             self.assertEqual(op["source_seqs"], [1])

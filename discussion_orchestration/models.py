@@ -224,6 +224,7 @@ class SpeakerOutput:
     #: 评分任务的结果；其他任务为空。
     scorecard: Scorecard | None = None
     plain_summary: str | None = None
+    no_new_issues: bool = False
 
 
 @dataclass(frozen=True)
@@ -380,6 +381,12 @@ class DiscussionSession:
             return self.agenda.item(self.topic_id)
         except KeyError:
             return None
+
+    def review_roles(self) -> tuple[Role, ...]:
+        """评审可向各议题的专业角色派发整改，旧议题沿用存档中的名单。"""
+        if self.agenda is None:
+            return PROFESSIONAL_ROLES
+        return tuple(dict.fromkeys(role for item in self.agenda.items for role in item.role_scope))
 
     def open_issues(self, topic_id: str | None = None) -> tuple[Issue, ...]:
         return tuple(

@@ -10,6 +10,7 @@ from typing import Mapping
 
 from .enums import (
     NAMABLE_ROLES,
+    PROFESSIONAL_ROLES,
     DivergenceKind,
     IssueStatus,
     ReasonCode,
@@ -78,7 +79,7 @@ def validate_agenda(agenda: Agenda) -> tuple[str, ...]:
             problems.append(f"{prefix}：必须指定必需发言者")
         if not set(item.required_roles) <= set(item.role_scope):
             problems.append(f"{prefix}：必需发言者必须落在点名范围内")
-        if not set(item.role_scope) <= NAMABLE_ROLES:
+        if not set(item.role_scope) <= set(PROFESSIONAL_ROLES):
             problems.append(f"{prefix}：点名范围只能是专业角色")
         for assumption in item.assumptions:
             if not all(

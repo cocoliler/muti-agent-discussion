@@ -43,6 +43,8 @@ def _scoring(req):
 
 
 def _host(req):
+    if req.kind in ("integration", "draft"):
+        return _scribe(req)
     if req.kind == "scoring":
         return _scoring(req)
     goal = _goal(req)
@@ -74,10 +76,10 @@ def _host(req):
 
 
 ADVICE = {
-    "product": "建议首版只交付能让用户完成「{}」的主流程，额外功能另行确认。",
+    "product": "建议首版覆盖「{}」的主流程。用试用前后的完成时间衡量收益，比较人工处理与自动化成本，再决定扩展范围。",
     "research": "围绕「{}」，建议请实际使用者演示现有操作，并记录最容易中断的一步。",
     "architect": "建议对「{}」使用一组有效输入和一组无效输入检查边界；记录输出，并确认重试后的状态。",
-    "designer": "建议为「{}」分别展示尚无内容、完成和无法继续三种状态，并在失败时说明下一步操作。",
+    "designer": "建议请实际使用者演示「{}」，核对最容易中断的一步；据此设计成功、空状态和失败后的操作入口。",
     "market": "建议围绕「{}」比较试用前后的任务完成时间，用试用记录验证价值。",
 }
 
@@ -116,6 +118,9 @@ def _critic(req):
     message = _latest(req, req.allowed_roles) or _latest(req, {"user"})
     if not message or not req.allowed_roles:
         raise ProviderError("insufficient_context")
+    earlier = _latest(req, {"critic"})
+    if req.round > 1 and earlier and message.seq > earlier.seq and (message.analysis or {}).get("verification"):
+        return dict(text="已核对本轮补充的处理方式，无新增异议。", source_seqs=[message.seq], no_new_issues=True)
     target = message.role if message.role in req.allowed_roles else req.allowed_roles[0]
     divergence = os.environ.get("DISCUSSION_SIMULATE_DIVERGENCE", "").strip().lower()
     return dict(text=f"针对消息 {message.seq} 的「{message.text[:160]}」，输入不完整时用户会看到什么结果？",
@@ -205,14 +210,15 @@ def _supporting_messages(req, item, allowed):
 
 
 def _scribe(req):
+    critic = _latest(req, {"critic"})
+    risks = [critic.text] if critic and (critic.analysis or {}).get("challenge_result") != "no_new_issues" else []
     if req.kind == "integration":
-        critic = _latest(req, {"critic"})
         if not req.messages:
             raise ProviderError("insufficient_context")
         return dict(text=f"已整理「{_goal(req)}」的讨论结论与待验证问题。",
                     source_seqs=[m.seq for m in req.messages], agreements=list(req.consensus),
                     alternatives=[], disagreements=[issue.description for issue in req.issues if not issue.treatment],
-                    assumptions=[], risks=[critic.text] if critic else [])
+                    assumptions=[], risks=risks)
     if req.draft:
         spec, mapping = deepcopy(req.draft.content), deepcopy(req.draft.source_map)
     else:
@@ -250,7 +256,6 @@ def _scribe(req):
         for seq in treatment_refs:
             if seq not in mapping[issue.target_item]:
                 mapping[issue.target_item].append(seq)
-    critic = _latest(req, {"critic"})
     supporting_seqs.update(_sources(critic))
     cited = sorted(supporting_seqs.union(seq for seqs in mapping.values() for seq in seqs))
     changes = [
@@ -259,7 +264,7 @@ def _scribe(req):
     ]
     return dict(text=f"已整理「{spec['product_name']}」的 {len(items)} 条需求及对应来源。",
                 source_seqs=cited, content=spec, source_map=mapping, agreements=list(req.consensus),
-                alternatives=[], disagreements=pending, assumptions=[], risks=[critic.text] if critic else [],
+                alternatives=[], disagreements=pending, assumptions=[], risks=risks,
                 requirement_changes=changes)
 
 
@@ -305,7 +310,7 @@ def _review(req):
             if not any(f["issue_id"] == source_id for f in findings):
                 findings.append(dict(issue_id=source_id, severity="blocking", target_item=target,
                                      description=f"{target} 与所引消息没有可识别的共同用语，需要确认依据。",
-                                     owner_role="research", closure_condition="补充与条目内容对应的来源消息。",
+                                     owner_role="designer", closure_condition="补充与条目内容对应的来源消息。",
                                      source_seqs=source_refs, status="open"))
         issue_id = f"AC-{target}"
         if _has_observation(item["acceptance_criteria"]) or any(f["issue_id"] == issue_id for f in findings):
@@ -318,7 +323,7 @@ def _review(req):
         questions.append(f"首版「{draft.content['product_name']}」由谁使用？")
         if not any(f["target_item"] == "target_users" and f["status"] == "open" for f in findings):
             findings.append(dict(issue_id="AUDIENCE", severity="blocking", target_item="target_users",
-                                 description="草稿中的使用者仍待确认。", owner_role="research",
+                                 description="草稿中的使用者仍待确认。", owner_role="designer",
                                  closure_condition="由用户明确首版使用者并写入 target_users。",
                                  source_seqs=refs, status="open"))
     blocking = any(f["status"] == "open" and f["severity"] == "blocking" for f in findings)

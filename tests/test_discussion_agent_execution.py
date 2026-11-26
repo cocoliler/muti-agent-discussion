@@ -114,7 +114,7 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
 
         async def invalid_then_valid(provider, request, messages):
             response = await complete(provider, request, messages)
-            if request.role != "scribe" or ":integration:" not in request.logical_task_id:
+            if request.role != "host" or ":integration:" not in request.logical_task_id:
                 return response
             prompts.append(messages)
             if len(prompts) > 2:
@@ -222,7 +222,10 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 self.assertIn("由谁使用", clarification["questions"][0])
                 self.assertEqual([m["role"] for m in messages if m["kind"] == "agenda"], ["host"])
                 self.assertCountEqual([m["role"] for m in messages if m["kind"] == "statement"],
-                                      ["product", "research", "architect", "designer", "business"])
+                                      ["product", "architect", "designer"])
+                self.assertEqual({m["role"] for m in messages if m["kind"] in {"integration", "draft"}}, {"host"})
+                self.assertEqual({m["role"] for m in messages} - {"user"},
+                                 {"host", "product", "architect", "designer", "challenger", "reviewer"})
                 challenges = [m for m in messages if m["kind"] == "challenge"]
                 self.assertEqual(len(challenges), 1)
                 self.assertEqual(challenges[0]["role"], "challenger")
@@ -315,31 +318,58 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 self.assertEqual(state["participants"][0]["error_code"], "AGENT_NO_PROGRESS")
                 self.assertEqual(service.repo.pending_runs("simulation"), [])
 
+    def test_no_new_challenge_reaches_review_without_response(self):
+        complete = SimulationProvider.complete
+
+        async def checked(provider, request, messages):
+            if request.kind == "challenge":
+                source = next(m.seq for m in request.messages if m.role == "architect")
+                return Completion(json.dumps(dict(text="核对技术边界后，无新增异议。",
+                                                  source_seqs=[source], no_new_issues=True)), {})
+            return await complete(provider, request, messages)
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}):
+            service = build_service(Path(directory) / "roles.sqlite")
+            with TestClient(create_app(service, with_agents=True)) as client, patch.object(SimulationProvider, "complete", checked):
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions",
+                                      json={"idea": "名称：登记。用户：管理员。目标：登记器材。"},
+                                      headers={"Idempotency-Key": str(uuid4())})
+                path = f"/api/v1/discussions/{created.json()['id']}"
+                messages = client.get(path + "/messages").json()["items"]
+                self.assertEqual(client.get(path).json()["status"], "awaiting_confirmation")
+                self.assertFalse(any(m["kind"] == "response" for m in messages))
+                challenge, = [m for m in messages if m["kind"] == "challenge"]
+                self.assertEqual(challenge["issue_ids"], [])
+                self.assertTrue(challenge["source_seqs"])
+                integration, = [m for m in messages if m["kind"] == "integration"]
+                self.assertEqual(integration["role"], "host")
+                self.assertEqual(integration["risks"], [])
+
     def test_retry_runs_only_unfinished_tasks(self):
         complete = SimulationProvider.complete
 
-        async def fail_research(provider, request, messages):
-            if request.role == "research":
+        async def fail_designer(provider, request, messages):
+            if request.role == "designer":
                 raise ProviderError("test_failure")
             return await complete(provider, request, messages)
 
         with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}):
             service = build_service(Path(directory) / "discussion.sqlite3")
             with TestClient(create_app(service, with_agents=True)) as client:
-                with patch.object(SimulationProvider, "complete", fail_research):
+                with patch.object(SimulationProvider, "complete", fail_designer):
                     creation = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={"idea": "Book rooms"},
                                            headers={"Idempotency-Key": str(uuid4())})
                 self.assertEqual(creation.status_code, 201, creation.text)
                 path = f"/api/v1/discussions/{creation.json()['id']}"
                 state = client.get(path).json()
-                self.assertEqual([task["role"] for task in state["pending_tasks"]], ["research"])
+                self.assertEqual([task["role"] for task in state["pending_tasks"]], ["designer"])
                 self.assertIn("test_failure", [person.get("error_code") for person in state["participants"]])
                 retry = client.post(f"{path}/actions", headers={"Idempotency-Key": str(uuid4())},
                                     json={"type": "run_agents", "expected_state_version": state["state_version"]})
                 self.assertTrue(retry.json()["decision"]["ok"], retry.text)
                 messages = client.get(f"{path}/messages").json()["items"]
                 self.assertCountEqual([m["role"] for m in messages if m["kind"] == "statement"],
-                                      ["product", "research", "architect", "designer", "business"])
+                                      ["product", "architect", "designer"])
                 self.assertEqual(client.get(path).json()["waiting_for"], "user_input")
 
     def test_value_divergence_goes_to_user_instead_of_peer_debate(self):
@@ -382,8 +412,10 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 scoring_requests.append(request)
             response = await complete(provider, request, messages)
             if request.role == "critic":
-                output = json.loads(response.content)
-                output["divergence"] = "tradeoff"
+                # 此场景要求每个修订版本有新的权衡；显式提供新的证据与问题。
+                source = next(m for m in reversed(request.messages) if m.role in request.allowed_roles)
+                output = dict(text=f"比较本轮方案的影响（消息 {source.seq}）。", source_seqs=[source.seq],
+                              target_roles=[source.role], verification="比较不同实现的用户影响", divergence="tradeoff")
                 return Completion(json.dumps(output), response.usage)
             return response
 
@@ -401,7 +433,7 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 self.assertEqual(state["status"], "awaiting_confirmation", state)
                 self.assertIsNotNone(state["scorecard"], state)
                 self.assertEqual(state["scorecard"]["chosen_option_id"], "A")
-                self.assertEqual(set(state["scorecard"]["stances"]), {"product", "research", "architect", "designer", "business"})
+                self.assertEqual(set(state["scorecard"]["stances"]), {"product", "architect", "designer"})
                 self.assertTrue(all(
                     {position["option_id"] for position in stances} == {"A", "B"}
                     for stances in state["scorecard"]["stances"].values()
@@ -603,7 +635,7 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 # Show that the background recovery also stopped at the human gate.
                 self.assertEqual(client.get(path).json()["last_seq"], state["last_seq"])
                 attempts = resumed.repo.list_attempts(sid)
-                host = [a for a in attempts if a["role"] == "host"]
+                host = [a for a in attempts if a["task_kind"] == "agenda"]
                 self.assertEqual([a["status"] for a in host], ["FAILED", "SUCCEEDED"])
                 self.assertEqual(host[0]["error"]["code"], "PROCESS_INTERRUPTED")
                 self.assertEqual(state["usage"]["calls"], len(attempts) - 1)

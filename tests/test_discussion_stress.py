@@ -153,7 +153,8 @@ class AgentStressTests(IsolatedAsyncioTestCase):
             with patch.object(SimulationProvider, "complete", inspect_input):
                 await AgentExecution().run(service, session_id)
 
-            self.assertEqual(len({request.role for request in observed}), 9)
+            self.assertEqual({request.role for request in observed},
+                             {"host", "product", "architect", "designer", "critic", "reviewer"})
             self.assertTrue(all(note not in request.model_dump_json() for request in observed))
             self.assertTrue(any(message["text"] == note and not message["substantive"]
                                 for message in service.messages(session_id, 0, 200)["items"]))

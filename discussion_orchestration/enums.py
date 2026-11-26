@@ -27,17 +27,15 @@ class Role(str, Enum):
 #: 首轮并行发言的专业角色。
 PROFESSIONAL_ROLES: tuple[Role, ...] = (
     Role.PRODUCT,
-    Role.RESEARCH,
     Role.ARCHITECT,
     Role.DESIGNER,
-    Role.BUSINESS,
 )
 
 #: 每个形成新共识的回合都必须参与的固定角色。
-CONSENSUS_ROLES: tuple[Role, ...] = (Role.CHALLENGER, Role.RECORDER)
+CONSENSUS_ROLES: tuple[Role, ...] = (Role.CHALLENGER, Role.HOST)
 
 #: 允许被主持人点名的角色，主持人与独立评审不参与点名回应。
-NAMABLE_ROLES: frozenset[Role] = frozenset(PROFESSIONAL_ROLES)
+NAMABLE_ROLES: frozenset[Role] = frozenset((*PROFESSIONAL_ROLES, Role.RESEARCH, Role.BUSINESS))  # 兼容已派发的旧议题
 
 
 class SessionStatus(str, Enum):

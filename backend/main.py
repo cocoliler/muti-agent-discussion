@@ -60,9 +60,10 @@ def store(connection, state):
 
 def append_phase(state, stage):
     state["stage"] = stage
-    state["messages"].extend(scenario_events(stage, len(state["messages"])))
+    legacy = any(message["role"] == "research" for message in state["messages"])
+    state["messages"].extend(scenario_events(stage, len(state["messages"]), legacy))
     if stage in (3, 4):
-        state["drafts"].append(scenario_draft(stage - 2))
+        state["drafts"].append(scenario_draft(stage - 2, legacy))
     return state
 
 

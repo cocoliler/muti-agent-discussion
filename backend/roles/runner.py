@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import math
-from time import monotonic
+from time import perf_counter
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ValidationError
@@ -100,7 +100,7 @@ class RoleRunner:
                     result.error = "call_limit"
                     break
                 self.calls_used += 1
-                start = monotonic()
+                start = perf_counter()
                 usage = None
                 error = None
                 diagnostic = None
@@ -160,7 +160,7 @@ class RoleRunner:
                     status = "succeeded" if error is None else "failed"
                     if error == "cancelled":
                         status = "cancelled"
-                    result.attempts.append(Attempt(attempt_no=number, status=status, elapsed_seconds=monotonic() - start,
+                    result.attempts.append(Attempt(attempt_no=number, status=status, elapsed_seconds=perf_counter() - start,
                                                    usage=usage, error=error, diagnostic=diagnostic))
                     result.error = error
                 if error == "invalid_output":

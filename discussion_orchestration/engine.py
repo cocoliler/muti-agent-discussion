@@ -3,7 +3,7 @@
 本层负责：
 - 会话状态机与阶段迁移校验；
 - 议题调度：首个议题激活、逐议题推进、议题切换；
-- 首轮并行派发、质疑、点名回应、记录员整合；
+- 首轮并行派发、质疑、点名回应、主持人整合；
 - 人工澄清（暂停等用户补充）与定向修订（评审退回只调度相关角色）；
 - 输入版本与快照一致性校验。
 
@@ -669,7 +669,7 @@ class DiscussionEngine:
                 )
             return self._result(session, ReasonCode.AWAITING_USER_INPUT, detail=detail)
 
-        if not review.findings or any(finding.responsible_role not in NAMABLE_ROLES for finding in review.findings):
+        if not review.findings or any(finding.responsible_role not in session.review_roles() for finding in review.findings):
             return self._reject(
                 session,
                 ReasonCode.REVISE_WITHOUT_RESPONSIBLE_ROLE,
@@ -913,9 +913,9 @@ class DiscussionEngine:
             for role, issue_ids in session.named_responses.items():
                 specs.append((role, TaskKind.RESPONSE, tuple(issue_ids)))
         elif phase == Phase.INTEGRATION:
-            specs.append((Role.RECORDER, TaskKind.INTEGRATION, ()))
+            specs.append((Role.HOST, TaskKind.INTEGRATION, ()))
         elif phase == Phase.DRAFTING:
-            specs.append((Role.RECORDER, TaskKind.DRAFT, ()))
+            specs.append((Role.HOST, TaskKind.DRAFT, ()))
         tasks: list[SpeakerTask] = []
         for ordinal, (role, kind, issue_ids) in enumerate(specs):
             task_id = (
@@ -1034,6 +1034,12 @@ class DiscussionEngine:
         if task.kind == TaskKind.CHALLENGE:
             if not output.text.strip():
                 return (ReasonCode.EMPTY_OUTPUT, "质疑发言正文不能为空")
+            if output.no_new_issues:
+                # 快照可含本轮派发前的整合摘要与历史依据，但不能引用派发后的发言。
+                cutoff = max(task.message_seqs, default=0)
+                if output.raised_issues or output.issue_ids or not output.source_seqs or max(output.source_seqs) > cutoff:
+                    return (ReasonCode.CONTRACT_MISMATCH, "无新增异议须引用本次任务中的发言，且不能同时提交问题")
+                return None
             if not output.raised_issues:
                 return (
                     ReasonCode.CHALLENGE_NEEDS_ISSUE,
@@ -1376,7 +1382,7 @@ class DiscussionEngine:
         self._transition(session, SessionStatus.REVIEWING)
         message = self._append(
             session,
-            Role.RECORDER,
+            output.role,
             MessageKind.DRAFT,
             f"候选稿 v{version} 已冻结送审",
             source_seqs=output.source_seqs,

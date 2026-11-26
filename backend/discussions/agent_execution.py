@@ -234,7 +234,7 @@ class AgentExecution:
                 # 兼容已冻结的旧会话，只读取本会话紧邻的上一版本，无需回写历史。
                 parent_id = next((d.draft_id for d in session.drafts if d.version == draft.version - 1), None)
             return [self._job(session, history, idea, "reviewer", "review", session.topic_id or "T1",
-                              topic=topic, draft=draft, issues=self._pending_review_issues(session, parent_id, history))]
+                              topic=topic, allowed_roles=session.review_roles(), draft=draft, issues=self._pending_review_issues(session, parent_id, history))]
         if session.status != SessionStatus.DISCUSSING or session.waiting_for != WaitingFor.ROLE_RESULTS:
             return []
         jobs = []
@@ -419,6 +419,8 @@ class AgentExecution:
     def _message_analysis(message) -> dict | None:
         notes = {key: value for key in ("basis", "verification")
                  if (value := getattr(message, key, None)) and len(value) <= 600}
+        if getattr(message, "kind", None) == MessageKind.CHALLENGE and not message.issue_ids:
+            notes["challenge_result"] = "no_new_issues"
         for key in ("agreements", "alternatives", "disagreements", "assumptions", "risks"):
             items = [item for item in getattr(message, key) if len(item) <= 600][:3]
             if items:
@@ -433,13 +435,16 @@ class AgentExecution:
             findings = {"open": [], "closed": []}
             for finding in output["findings"]:
                 role = finding["owner_role"]
+                # 澄清后重开议题可能承接九角色旧稿。保持原问题 ID 和依据，仅转交新的整改负责人。
+                if role not in request.allowed_roles:
+                    role = {"research": "designer", "market": "product", "scribe": "product"}.get(role, role)
                 findings[finding["status"]].append({
                     "finding_id": finding["issue_id"], "issue_id": finding["issue_id"],
                     "source_seqs": finding["source_seqs"],
                     "severity": "blocking" if finding["severity"] == "blocking" else "major",
                     "target_item": finding["target_item"], "summary": finding["description"],
                     "close_condition": finding["closure_condition"],
-                    "responsible_role": "product" if role == "scribe" else ENGINE_ROLES.get(role, role),
+                    "responsible_role": ENGINE_ROLES.get(role, role),
                 })
             payload = {"review_id": request.logical_task_id, "session_id": request.session_id,
                        "draft_id": output["draft_id"], "input_version": request.input_version,
@@ -464,11 +469,14 @@ class AgentExecution:
                     payload[key] = output[key]
             if task.kind == TaskKind.CHALLENGE:
                 prefix = f"I-{task.round_no}-{task.task_id.rsplit(':', 1)[-1]}"
-                objections = output.get("objections") or [{
-                    "description": output["text"], "owner_role": output["target_roles"][0],
-                    "source_seqs": output["source_seqs"], "verification": output["verification"],
-                    "divergence": output.get("divergence", "fact"), "user_question": output.get("user_question"),
-                }]
+                payload["no_new_issues"] = output.get("no_new_issues", False)
+                objections = output.get("objections") or []
+                if not objections and not payload["no_new_issues"]:
+                    objections = [{
+                        "description": output["text"], "owner_role": output["target_roles"][0],
+                        "source_seqs": output["source_seqs"], "verification": output["verification"],
+                        "divergence": output.get("divergence", "fact"), "user_question": output.get("user_question"),
+                    }]
                 payload["raised_issues"] = [
                     {"issue_id": f"{prefix}-{index}" if output.get("objections") else prefix,
                      "topic_id": task.topic_id, "raised_by": job.role, "severity": "major",

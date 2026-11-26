@@ -202,7 +202,7 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
           <summary>查看各角色立场</summary>
           {Object.entries(scorecard.stances).map(([role, stances]) => <div key={role}>
             <strong>{{ product: '产品经理', research: '用户研究员', architect: '技术架构师',
-              designer: '交互设计师', business: '商业分析' }[role] ?? role}</strong>
+              designer: '用户体验设计师', business: '商业分析' }[role] ?? role}</strong>
             <ul>{stances.map((stance) => <li key={stance.option_id}>
               {stance.option_id} · {{ support: '赞同', oppose: '反对', conditional: '有条件赞同' }[stance.position] ?? stance.position}
               {' · '}{stance.reason}

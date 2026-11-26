@@ -20,11 +20,11 @@ const phaseLabels: Record<string, string> = {
 };
 const agentPhaseLabels: Record<string, string> = {
   statements: '专业角色正在并行发言', challenge: '质疑者正在审视本轮发言', responses: '专业角色正在回应问题',
-  stances: '专业角色正在独立比较方案', integration: '记录员正在整合讨论', drafting: '记录员正在撰写规格',
+  stances: '专业角色正在独立比较方案', integration: '主持人正在整合讨论', drafting: '主持人正在撰写规格',
 };
 const roleLabels: Record<string, string> = {
   user: '你', host: '主持人', product: '产品经理', research: '用户研究员', architect: '技术架构师',
-  designer: '交互设计师', business: '商业分析', challenger: '质疑者', recorder: '记录员', reviewer: '独立评审',
+  designer: '用户体验设计师', business: '商业分析', challenger: '质疑者', recorder: '记录员', reviewer: '独立评审',
 };
 const roleColors: Record<string, string> = {
   host: '#a99bff', product: '#f4ae76', research: '#75cbb8', architect: '#8caeff', designer: '#ec99c2',
@@ -77,7 +77,7 @@ function describeAgentDiagnostic(role: string, diagnostic: string) {
   if (/^missing at (?:source_seqs|findings\/\d+\/source_seqs)$/.test(diagnostic)) {
     return `${roleLabels[role] ?? role}的输出缺少消息引用，重试会重新核对引用。`;
   }
-  if (diagnostic.startsWith('requirement_changes')) return '记录员的需求变更记录未通过校验，重试会重新核对旧需求的去向。';
+  if (diagnostic.startsWith('requirement_changes')) return '主持人的需求变更记录未通过校验，重试会重新核对旧需求的去向。';
   return `输出校验失败：${diagnostic}`;
 }
 

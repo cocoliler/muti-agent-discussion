@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from time import monotonic, sleep
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -30,7 +31,7 @@ class SignedSpecExportTests(unittest.TestCase):
         self.assertEqual(result.status_code, 201)
         self.sid = result.json()["id"]
         self.path = f"/api/v1/discussions/{self.sid}"
-        state = self.workbench.get(self.path).json()
+        state = self.wait_for_new_review(self.path, None)
         self.assertEqual(state["status"], "awaiting_confirmation")
         if state["active_draft"]["review_verdict"] == "revise":
             returned = self.embedded.post(self.path + "/actions", headers={"Idempotency-Key": str(uuid4())}, json={
@@ -38,11 +39,22 @@ class SignedSpecExportTests(unittest.TestCase):
                 "expected_state_version": state["state_version"],
             })
             self.assertTrue(returned.json()["decision"]["ok"], returned.text)
-            state = self.workbench.get(self.path).json()
+            state = self.wait_for_new_review(self.path, state["active_draft"]["draft_id"])
         self.assertEqual(state["active_draft"]["review_verdict"], "pass")
         self.confirm = {"draft_id": state["active_draft"]["draft_id"], "input_version": state["input_version"],
                         "expected_state_version": state["state_version"]}
         self.headers = {"Idempotency-Key": str(uuid4())}
+
+    def wait_for_new_review(self, path, parent_id):
+        # 两个 API 应用共享临时库，后台工作者可能已认领修订；以新稿完成评审为准。
+        deadline = monotonic() + 12
+        while monotonic() < deadline:
+            state = self.workbench.get(path).json()
+            draft = state.get("active_draft") or {}
+            if state["status"] == "awaiting_confirmation" and draft.get("draft_id") != parent_id:
+                return state
+            sleep(0.05)
+        self.fail(f"修订稿未完成评审：{state['status']} / {state['waiting_for']}")
 
     def assert_download(self):
         url = self.workbench.get(self.path).json()["export_url"]
@@ -76,6 +88,21 @@ class SignedSpecExportTests(unittest.TestCase):
         # 未签收时默认导出仍然拒绝；未知草稿版本返回 404。
         self.assertEqual(self.workbench.get(self.path + "/export").status_code, 409)
         self.assertEqual(self.workbench.get(self.path + "/export?draft_id=missing").status_code, 404)
+
+    def test_demo_links_follow_six_role_and_legacy_message_numbers(self):
+        from backend.scenario import scenario_draft, scenario_events
+
+        for legacy, offset, architect_seq in ((False, 5, 4), (True, 7, 5)):
+            with self.subTest(legacy=legacy):
+                for stage in range(2, 6):
+                    events = scenario_events(stage, offset, legacy)
+                    if stage == 2:
+                        self.assertEqual(events[0]["refs"], (architect_seq,))
+                    for event in events:
+                        self.assertTrue(all(0 < seq < event["seq"] for seq in event["refs"]))
+                    offset = events[-1]["seq"]
+                self.assertEqual(events[-1]["refs"], (offset - 1,))
+                self.assertEqual(scenario_draft(1, legacy)["sources"]["FR-02"][0], architect_seq)
 
     def test_demo_export_is_importable(self):
         sid = str(uuid4())
@@ -139,7 +166,7 @@ class SignedSpecExportTests(unittest.TestCase):
             "expected_state_version": signed["session"]["state_version"],
         })
         self.assertTrue(reopened.json()["decision"]["ok"], reopened.text)
-        second = self.workbench.get(path).json()
+        second = self.wait_for_new_review(path, old_id)
         self.assertEqual(second["active_draft"]["review_verdict"], "pass")
         self.assertEqual(self.workbench.get(path + "/export").content, old_file.content)
         latest = self.workbench.post(path + "/confirm", headers={"Idempotency-Key": str(uuid4())}, json={

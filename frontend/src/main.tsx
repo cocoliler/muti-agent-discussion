@@ -9,7 +9,7 @@ const roles = {
   product: ['产品经理', '产', '#f4ae76'],
   research: ['用户研究员', '研', '#75cbb8'],
   architect: ['技术架构师', '技', '#8caeff'],
-  designer: ['交互设计师', '设', '#ec99c2'],
+  designer: ['用户体验设计师', '设', '#ec99c2'],
   market: ['商业分析', '商', '#dbc38a'],
   critic: ['质疑者', '辩', '#ff9e9f'],
   scribe: ['记录员', '录', '#80ccfa'],
@@ -30,9 +30,9 @@ type Session = { id: string; stage: number; messages: Message[]; drafts: Draft[]
 const phases = ['主持与开题', '并行发言', '质疑与回应', '草稿与评审', '定向修订通过', '用户签收'];
 const actions = ['开始角色发言', '发起质疑', '生成草稿并送审', '执行定向修订', '确认并签收', '导出规格 JSON'];
 const prompts = [
-  '主持人已发布议题。接下来五位专业角色将给出各自观点。',
-  '五位角色已完成发言。质疑者将针对架构师的预约冲突问题提问。',
-  '架构与设计已回应。记录员将生成草稿 v1 并提交独立评审。',
+  '主持人已发布议题。接下来三位专业角色将给出各自观点。',
+  '三位角色已完成发言。质疑者将针对架构师的预约冲突问题提问。',
+  '架构与设计已回应。主持人将生成草稿 v1 并提交独立评审。',
   '评审退回 FR-02。请相关角色补齐并发场景的验收条件。',
   '草稿 v2 已通过评审。可比较改动并签收当前版本。',
   '已签收。下载符合 FlowStudio DesignSpecContent v1.0 的规格。',
@@ -180,7 +180,7 @@ function Demo({ openWorkbench }: { openWorkbench: () => void }) {
           <span>{index < stage ? '✓' : index + 1}</span>{phase}
         </li>)}</ol>
         <h2>参与角色</h2>
-        <ul className="roles">{(Object.keys(roles) as Role[]).filter((role) => role !== 'user').map((role) => <li key={role}><Avatar role={role} />{roles[role][0]}</li>)}</ul>
+        <ul className="roles">{(['host', 'product', 'designer', 'architect', 'critic', 'reviewer'] as const).map((role) => <li key={role}><Avatar role={role} />{roles[role][0]}</li>)}</ul>
       </aside>
 
       <main className="discussion">
@@ -236,7 +236,7 @@ function Demo({ openWorkbench }: { openWorkbench: () => void }) {
               <div className="references"><span>来源</span>{draft.sources[requirement.id].map((seq) => <button key={seq} onClick={() => locate(seq)} aria-label={'定位来源消息 ' + seq}>#{seq}</button>)}</div>
             </section>;
           })}
-        </div> : <div className="spec-empty"><span aria-hidden="true">▤</span><h3>等待第一版草稿</h3><p>记录员整理讨论后，这里将显示需求、验收条件和来源。</p></div>}
+        </div> : <div className="spec-empty"><span aria-hidden="true">▤</span><h3>等待第一版草稿</h3><p>主持人整理讨论后，这里将显示需求、验收条件和来源。</p></div>}
       </aside>
     </div>
   </div>;

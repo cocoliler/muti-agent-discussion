@@ -56,11 +56,11 @@ stateDiagram-v2
 
 | 回合 `RoundKind` | 阶段顺序 | 派发对象 |
 | --- | --- | --- |
-| `FIRST` 首轮 | `STATEMENTS → CHALLENGE → RESPONSES → INTEGRATION` | 五个专业角色并行，共用同一 `snapshot_ref` 与 `input_version` |
-| `DIRECTED` 定向补充 | `RESPONSES → CHALLENGE → INTEGRATION` | 主持人点名的角色，之后质疑者复核、记录员整合 |
+| `FIRST` 首轮 | `STATEMENTS → CHALLENGE → RESPONSES → INTEGRATION` | 三个专业角色（产品、体验、架构）并行，共用同一 `snapshot_ref` 与 `input_version` |
+| `DIRECTED` 定向补充 | `RESPONSES → CHALLENGE → INTEGRATION` | 主持人点名的角色，之后质疑者复核、主持人整合 |
 | `REVISION` 评审修订 | `RESPONSES → CHALLENGE → INTEGRATION` | 仅评审发现中 `responsible_role` 指定的角色 |
 
-质疑者每回合至少给出一个指向具体发言或用户输入的问题；记录员在每个形成新共识的回合参与整合。因此“必需发言 + 质疑 + 整合”齐备后才允许成稿。
+质疑者每回合核对具体发言。没有新增异议时提交 `no_new_issues=true` 和本次任务的消息引用，有异议时按问题派发回应。主持人在整合与成稿阶段分别执行独立任务。因此“必需发言 + 质疑 + 整合”齐备后才允许成稿。
 
 默认按收敛结果推进。可通过 `DISCUSSION_MAX_DIRECTED_ROUNDS` / `DISCUSSION_MAX_REVISION_ROUNDS` 为各输入版本启用轮次保护：定向补充轮超限返回 `ROUND_LIMIT`；评审再次退回且修订轮已用尽时直接转人工澄清，不进入下一轮修订。这样即使评审每轮换个措辞提新问题，也不会无限循环。
 
@@ -95,7 +95,7 @@ stateDiagram-v2
 4. **问题关闭要有依据**：关闭阻断问题需要证据或可验证的处理方式。
 5. **自动执行批次**：角色执行器每批最多调用 32 次。讨论仍需推进时，执行器自动开启下一批。
 6. **草稿版本化**：每次送审生成新的 `DraftRevision`（`parent_id` 指向上一版），旧版本 `current=False`；签收只认当前版本 + 同版本 PASS 评审。
-7. **分歧记录随稿留存**：记录员返回的 `agreements` / `alternatives` / `disagreements` 落到 `DraftRevision`，供界面展示与签收归档；导出 `DesignSpecContent` 时不含这些字段。
+7. **分歧记录随稿留存**：主持人成稿任务返回的 `agreements` / `alternatives` / `disagreements` 落到 `DraftRevision`，供界面展示与签收归档；导出 `DesignSpecContent` 时不含这些字段。
 8. **轮次保护可配置**：新输入重新计算定向补充和修订轮次。
 9. **打分确定性**：同一份评分卡与权重永远得到同一个排名（同分先比用户价值，再按 `option_id`），权重默认 0.30/0.25/0.15/0.15/0.15。
 10. **决策可追溯**：`DraftRevision.scorecard_id` / `chosen_option_id` 记录该版本依据的评分卡与被采纳方案，导出正文不含这些字段。
@@ -116,7 +116,7 @@ decision = engine.submit_agenda(session, Agenda(
     summary="明确首版范围与并发冲突处理",
     items=(AgendaItem(topic_id="T1", title="预约与冲突", question="如何避免重复预约？"),),
 ))
-# decision.tasks 即首轮并行的 5 个角色任务
+# decision.tasks 即首轮并行的 3 个专业角色任务
 
 # 回灌角色结果
 engine.submit_output(session, output)

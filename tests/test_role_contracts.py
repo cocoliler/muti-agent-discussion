@@ -39,7 +39,7 @@ class RoleContractTests(unittest.TestCase):
     def check(self, req, output):
         return validate_output(req, json.dumps(output, ensure_ascii=False))
 
-    def test_nine_role_contracts_and_scoped_prompts(self):
+    def test_current_and_legacy_role_contracts_and_scoped_prompts(self):
         self.assertEqual(set(OUTPUT_MODELS), {"host", "product", "research", "architect", "designer", "market", "critic", "scribe", "reviewer"})
         prompts = set()
         for role in OUTPUT_MODELS:
@@ -102,6 +102,27 @@ class RoleContractTests(unittest.TestCase):
         for changes in (dict(source_seqs=[]), dict(source_seqs=[99]), dict(target_roles=["host"]), dict(target_roles=["market"]), dict(verification="  ")):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.check(req, dict(output, **changes))
+
+    def test_review_assigns_new_findings_to_current_specialists_and_keeps_historical_owners(self):
+        req = task("reviewer", draft=frozen())
+        current = dict(issue(), owner_role="designer", status="open", source_seqs=[7])
+        self.check(req, review(verdict="REVISE", findings=[current]))
+        for retired in ("research", "market", "scribe"):
+            with self.subTest(role=retired), self.assertRaisesRegex(RoleRuleError, "owner_role"):
+                self.check(req, review(verdict="REVISE", findings=[dict(current, owner_role=retired)]))
+        legacy_issue = dict(issue(), owner_role="research", source_seqs=[7])
+        legacy = task("reviewer", draft=frozen(), issues=[legacy_issue])
+        checked = self.check(legacy, review(findings=[dict(legacy_issue, status="closed")]))
+        self.assertEqual(checked.findings[0].owner_role, "research")
+
+    def test_critic_can_conclude_no_new_issue_with_evidence(self):
+        req = task()
+        report = dict(text="已核对并发约束，本轮无新增异议。", source_seqs=[7], no_new_issues=True)
+        self.assertTrue(self.check(req, report).no_new_issues)
+        for changes in (dict(source_seqs=[]), dict(source_seqs=[17]), dict(target_roles=["architect"]),
+                        dict(no_new_issues=False)):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.check(req, {**report, **changes})
 
     def test_specialist_evidence_and_market_not_applicable(self):
         output = dict(text="内部工具暂不涉及外部定价。", source_seqs=[7], basis="not_applicable")
