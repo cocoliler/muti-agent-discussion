@@ -8,10 +8,14 @@ from typing import Annotated, Any, Literal, get_args
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, ValidationInfo, model_validator
 
+from spec_handoff.draft import DraftSpec
+from spec_handoff.validation import build_report
+
 
 Specialist = Literal["product", "research", "architect", "designer", "market"]
 Role = Specialist | Literal["host", "critic", "scribe", "reviewer"]
 ScoreDimension = Literal["user_value", "feasibility", "cost", "differentiation", "risk"]
+Divergence = Literal["fact", "value", "tradeoff", "routine"]
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Positive = Annotated[int, Field(gt=0)]
 Seqs = list[Positive]
@@ -125,7 +129,7 @@ class Issue(Contract):
     owner_role: Specialist | Literal["scribe"]
     closure_condition: Text
     #: fact 靠证据收敛；value 必须由用户裁决；tradeoff 按评分维度权衡。
-    kind: Literal["fact", "value", "tradeoff"] = "fact"
+    kind: Divergence = "fact"
 
 
 class PriorIssue(Issue):
@@ -309,8 +313,10 @@ class ObjectionInput(Contract):
     owner_role: Specialist
     source_seqs: Annotated[Seqs, Field(min_length=1)]
     verification: Text
-    divergence: Literal["fact", "value", "tradeoff"] = "fact"
+    divergence: Divergence = "fact"
     user_question: Annotated[Text, Field(max_length=200)] | None = None
+    proposed_resolution: Text | None = None
+    reopen_if: Text | None = None
 
 
 class CriticOutput(RoleOutput):
@@ -454,6 +460,9 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
             "在 objections 中列出 1 至 4 个可以独立回应的关键异议。每条写明 description、owner_role、"
             "source_seqs、verification 和 divergence。owner_role 只选一位有能力回应的议题角色；"
             "verification 写明可观察的关闭条件。value 类型另填可直接回答的 user_question，不超过 200 字。"
+            "每条异议说明会影响哪项决定，以及可行的处理方向。已有回应且没有新证据时不要重提。"
+            "仅当用户已授权范围内的非阻断、可逆实现细节可直接选择默认做法时，用 routine，填写 proposed_resolution 与 reopen_if。"
+            "不得把改变用户目标、硬约束、关键事实或业务取舍的问题标成 routine。"
             "text 简述关键冲突。顶层 source_seqs 汇总各条实际引用；target_roles、verification 等旧式顶层字段可省略。"
         )
     if request.kind == "scoring":
@@ -556,6 +565,15 @@ def check_draft_changes(request, output):
         if set(change.replacement_ids) - current:
             raise RoleRuleError("requirement_changes references an unknown replacement requirement")
     output.requirement_changes = changes
+
+
+def build_draft_content(output: dict) -> dict:
+    content = output["content"]
+    source_map = output["source_map"]
+    return {**content, "requirements": [
+        {**item, "source_seqs": source_map[item["id"]]} for item in content["requirements"]
+    ], "removed_requirement_ids": [change["previous_id"] for change in output["requirement_changes"]
+                                    if change["previous_id"] not in source_map]}
 
 
 def check_review(request, output, visible):
@@ -754,11 +772,20 @@ def validate_output(request: RoleRequest, raw: str) -> RoleOutput:
                 raise RoleRuleError("objection owner_role outside the topic's allowed_roles")
             if item.divergence == "value" and not item.user_question:
                 raise RoleRuleError("a value objection needs a user_question")
+            if item.divergence == "routine" and (not item.proposed_resolution or not item.reopen_if or item.user_question):
+                raise RoleRuleError("a routine objection needs proposed_resolution and reopen_if, with no user_question")
             check_sources(item.source_seqs, visible, f"objections/{index}/source_seqs")
     elif isinstance(output, ScribeOutput):
         output.content = split_technical_constraints(output.content)
         check_source_map(output.content, output.source_map, visible)
         check_draft_changes(request, output)
+        draft = DraftSpec.parse(build_draft_content(output.model_dump()))
+        parent = DraftSpec.parse(request.draft.content) if request.draft else None
+        report = build_report(draft, known_seqs=sorted(visible), parent=parent)
+        if not report.ok:
+            first = report.errors[0]
+            hint = " (limit 1 MiB)" if first.code.value == "EXPORT_TOO_LARGE" else ""
+            raise RoleRuleError(f"delivery preflight: {first.code.value} at {first.path}{hint}")
     elif isinstance(output, IntegrationOutput):
         if not output.source_seqs:
             raise RoleRuleError("integration source_seqs must cite at least one snapshot message")

@@ -252,6 +252,16 @@ class RoleContractTests(unittest.TestCase):
         with self.assertRaisesRegex(RoleRuleError, "all previous issues"):
             self.check(req, dict(result, new_findings=[new], reassessments=[]))
 
+    def test_scribe_rejects_an_oversize_draft_before_send_to_review(self):
+        template = SPEC["requirements"][0]
+        items = [{**template, "id": f"FR-{index:03d}",
+                  "acceptance_criteria": [f"场景 {item}：" + "中" * 1900 for item in range(20)]}
+                 for index in range(1, 12)]
+        output = dict(text="准备送审", source_seqs=[7], agreements=[], alternatives=[], disagreements=[], assumptions=[], risks=[],
+                      content=dict(SPEC, requirements=items), source_map={item["id"]: [7] for item in items})
+        with self.assertRaisesRegex(RoleRuleError, "delivery preflight: EXPORT_TOO_LARGE"):
+            self.check(task("scribe", kind="draft"), output)
+
     def test_new_user_input_can_update_old_parent_but_removed_ids_need_a_change_record(self):
         parent = dict(frozen(), input_version=1)
         req = task("scribe", draft=parent)

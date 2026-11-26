@@ -118,6 +118,7 @@ class DivergenceKind(str, Enum):
     VALUE = "value"
     #: 权衡分歧：各有取舍，按评分维度比较。
     TRADEOFF = "tradeoff"
+    ROUTINE = "routine"
 
 
 class ScoreDimension(str, Enum):
@@ -171,6 +172,7 @@ class HostAction(str, Enum):
     START_DIRECTED_ROUND = "start_directed_round"
     SUBMIT_DRAFT = "submit_draft"
     NEXT_TOPIC = "next_topic"
+    DECIDE_ROUTINE = "decide_routine"
 
 
 class WaitingFor(str, Enum):

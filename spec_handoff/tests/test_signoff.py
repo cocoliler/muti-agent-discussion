@@ -88,6 +88,18 @@ class SignOffGateTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn(Code.SOURCE_MISSING.value, _codes(result))
 
+    def test_signoff_rejects_structurally_valid_content_that_is_too_large_to_import(self) -> None:
+        draft = make_draft()
+        template = draft["requirements"][0]
+        draft["requirements"] = [
+            {**template, "id": f"FR-{index:03d}", "acceptance_criteria": [f"场景 {item}：" + "中" * 1900 for item in range(20)]}
+            for index in range(1, 12)
+        ]
+        session = make_session(draft)
+        result = sign_off(session, draft_id="s-1-v1", input_version=1)
+        self.assertFalse(result.ok)
+        self.assertIn(Code.EXPORT_TOO_LARGE.value, _codes(result))
+
     def test_parent_draft_id_stability_enforced(self) -> None:
         parent = make_draft()
         parent["requirements"].append(

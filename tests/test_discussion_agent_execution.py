@@ -459,6 +459,9 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                      "verification": "失败时可识别重试入口"},
                     {"description": "首版选择同步还是异步", "owner_role": "product", "source_seqs": [evidence],
                      "verification": "比较两种方案的风险", "divergence": "tradeoff"},
+                    {"description": "两种列表排序均可撤回", "owner_role": "designer", "source_seqs": [evidence],
+                     "verification": "排序切换不影响记录", "divergence": "routine",
+                     "proposed_resolution": "列表默认按时间排序", "reopen_if": "用户反馈难以查找"},
                 ]}
             if request.kind == "scoring":
                 output["scorecard"]["options"] = [
@@ -503,6 +506,9 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 self.assertEqual(score_attempts, 2)
                 self.assertEqual(review_attempts, 2)
                 messages = client.get(f"{path}/messages?limit=100").json()["items"]
+                decisions = [message for message in messages if message["role"] == "host" and "本版暂按" in message["text"]]
+                self.assertEqual(len(decisions), 1)
+                self.assertIn("重开条件：用户反馈难以查找", decisions[0]["text"])
                 for kind in ("agenda", "stance", "review"):
                     selected = [message for message in messages if message["kind"] == kind]
                     self.assertTrue(selected)
@@ -513,7 +519,9 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 self.assertEqual(responses["architect"][0].closure_condition, "并发请求只产生一条记录")
                 self.assertEqual(responses["designer"][0].closure_condition, "失败时可识别重试入口")
                 review_inputs = [request for request in requests if request.kind == "draft"]
-                self.assertEqual({issue.owner_role for issue in review_inputs[-1].issues}, {"architect", "designer"})
+                self.assertEqual({issue.owner_role for issue in review_inputs[-1].issues}, {"architect", "designer", "scribe"})
+                routine = next(issue for issue in review_inputs[-1].issues if issue.kind == "routine")
+                self.assertIn("列表默认按时间排序", routine.treatment)
                 stances = [request for request in requests if request.kind == "stance"]
                 self.assertTrue(all([issue.kind for issue in request.issues] == ["tradeoff"] for request in stances))
                 self.assertTrue(stances)

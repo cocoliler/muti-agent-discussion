@@ -15,8 +15,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
+from discussion_orchestration.enums import MAX_DIRECTED_ROUNDS
 from discussion_orchestration.models import ClarificationAnswer
 from discussion_orchestration.scoring import rank_options
+from spec_handoff import DraftSpec
+from spec_handoff.validation import build_report, parent_draft
 
 from .codec import CodecError, decode, encode
 from .errors import ApiError, decision_error_code, decision_status
@@ -90,7 +93,7 @@ class DiscussionService:
             idea=idea,
         )
         session.max_directed_rounds = _configured_limit(
-            "DISCUSSION_MAX_DIRECTED_ROUNDS", getattr(session, "max_directed_rounds", None)
+            "DISCUSSION_MAX_DIRECTED_ROUNDS", getattr(session, "max_directed_rounds", None) or MAX_DIRECTED_ROUNDS
         )
         session.max_revision_rounds = _configured_limit(
             "DISCUSSION_MAX_REVISION_ROUNDS", getattr(session, "max_revision_rounds", None)
@@ -190,8 +193,6 @@ class DiscussionService:
         `removed_requirement_ids` 只用于追溯，`DraftSpec.to_content()` 会把它们剔除，
         得到与 FlowStudio 导入契约同形的正文；结构不合格由导出层返回 409。
         """
-
-        from spec_handoff import DraftSpec
 
         session, _ = self._load(session_id)
         draft = self._find_draft(session, draft_id)
@@ -442,6 +443,18 @@ class DiscussionService:
             except CodecError as exc:
                 raise ApiError("VALIDATION_FAILED", str(exc), status=422) from exc
 
+        def submit_output():
+            output = decode_payload("SpeakerOutput")
+            task = session.tasks.get(output.task_id)
+            if (task is not None and task.kind == output.kind and output.kind.value == "draft" and output.draft_content
+                    and output.input_version == session.input_version and output.snapshot_ref == session.snapshot_ref):
+                parent = DraftSpec.parse(session.drafts[-1].content) if session.drafts else None
+                report = build_report(DraftSpec.parse(output.draft_content), session=session, parent=parent)
+                if not report.ok:
+                    raise ApiError("VALIDATION_FAILED", "候选稿未通过下游导入预检", status=422,
+                                   issues=[item.as_dict() for item in report.errors])
+            return engine.submit_output(session, output)
+
         handler = {
             "pause": lambda: engine.pause(session, payload.get("reason", "")),
             "resume": lambda: engine.resume(session),
@@ -450,9 +463,7 @@ class DiscussionService:
             "abandon_task": lambda: engine.abandon_task(
                 session, payload.get("task_id", ""), payload.get("reason", "")
             ),
-            "submit_output": lambda: engine.submit_output(
-                session, decode_payload("SpeakerOutput")
-            ),
+            "submit_output": submit_output,
             "submit_review": lambda: engine.submit_review(
                 session, decode_payload("ReviewResult")
             ),
@@ -724,13 +735,24 @@ class DiscussionService:
         review = next((item for item in reversed(getattr(session, "reviews", ()))
                        if item.draft_id == draft.draft_id), None)
         scorecard_id = getattr(draft, "scorecard_id", None)
+        report = build_report(DraftSpec.parse(draft.content), session=session, parent=parent_draft(session.drafts, draft))
+        verdict = getattr(review.verdict, "value", review.verdict) if review else None
+        delivery_status = "pending_review"
+        if not report.ok:
+            delivery_status = "invalid"
+        elif review:
+            blocked = verdict == "needs_input" or any(getattr(finding.severity, "value", finding.severity) == "blocking"
+                                                     for finding in review.findings)
+            delivery_status = "blocked_review" if blocked else "ready"
         return {
             "draft_id": draft.draft_id,
             "version": draft.version,
             "input_version": draft.input_version,
             "parent_id": getattr(draft, "parent_id", None),
             "open_issue_ids": list(draft.open_issue_ids),
-            "review_verdict": getattr(review.verdict, "value", review.verdict) if review else None,
+            "review_verdict": verdict,
+            "delivery_status": delivery_status,
+            "delivery_errors": [item.as_dict() for item in report.errors],
             "content": dict(draft.content),
             "agreements": list(getattr(draft, "agreements", ()) or ()),
             "alternatives": list(getattr(draft, "alternatives", ()) or ()),

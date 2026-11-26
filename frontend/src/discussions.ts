@@ -34,6 +34,8 @@ export type DraftVersion = {
 
 export type Draft = DraftVersion & {
   review_verdict: string | null;
+  delivery_status?: 'pending_review' | 'invalid' | 'blocked_review' | 'ready' | null;
+  delivery_errors?: { path?: string; message?: string }[];
   content: { product_name?: string; requirements?: Requirement[]; [key: string]: unknown };
   agreements?: string[];
   alternatives?: string[];

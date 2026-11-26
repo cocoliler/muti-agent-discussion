@@ -280,7 +280,33 @@ class DiscussionEngine:
             return self.submit_candidate_draft(session)
         if proposal.action == HostAction.NEXT_TOPIC:
             return self.move_to_next_topic(session)
+        if proposal.action == HostAction.DECIDE_ROUTINE:
+            return self.decide_routine(session, proposal.issue_ids)
         return self._reject(session, ReasonCode.INVALID_ASSIGNMENT, "未知的调度动作")
+
+    def decide_routine(self, session: DiscussionSession, issue_ids: tuple[str, ...]) -> Decision:
+        """在当前议题内采用有证据和重开条件的可逆默认方案。"""
+        if (session.status != SessionStatus.DISCUSSING or session.waiting_for != WaitingFor.HOST_DECISION or session.topic_id is None
+                or session.tasks):
+            return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不能拍板")
+        if not issue_ids or len(set(issue_ids)) != len(issue_ids):
+            return self._reject(session, ReasonCode.INVALID_ISSUE, "拍板需要唯一的议题问题")
+        open_issues = {issue.issue_id: issue for issue in session.open_issues(session.topic_id)}
+        issues = [open_issues.get(issue_id) for issue_id in issue_ids]
+        if any(issue is None or issue.kind != DivergenceKind.ROUTINE or issue.severity == Severity.BLOCKING
+               or issue.needs_user or not issue.source_seqs or not (issue.proposed_resolution or "").strip()
+               or not (issue.reopen_if or "").strip() for issue in issues):
+            return self._reject(session, ReasonCode.INVALID_ISSUE, "只有当前议题的非阻断可逆问题可由主持人拍板")
+        for issue in issues:
+            assert issue is not None
+            summary = f"本版暂按「{issue.proposed_resolution}」推进。"
+            message = self._append(session, Role.HOST, MessageKind.DECISION,
+                                   f"{summary}\n依据：{issue.summary}\n重开条件：{issue.reopen_if}",
+                                   plain_summary=summary, issue_ids=(issue.issue_id,), source_seqs=issue.source_seqs)
+            issue.status = IssueStatus.CLOSED
+            issue.closed_by_seq = message.seq
+            issue.assignee = Role.HOST
+        return self._result(session, ReasonCode.OK, seq=session.last_seq)
 
     def ask_user(
         self,
@@ -480,6 +506,9 @@ class DiscussionEngine:
         if problem:
             return self._reject(session, problem[0], problem[1])
 
+        if task.kind == TaskKind.CHALLENGE:
+            output = self._remove_repeated_objections(session, output)
+
         text = f"不适用：{output.not_applicable}" if output.not_applicable else output.text
         seq = self._append(
             session,
@@ -506,6 +535,24 @@ class DiscussionEngine:
         return self._advance_or_wait(session, task.phase)
 
     # ------------------------------------------------------------ 评审与签收
+    @staticmethod
+    def _remove_repeated_objections(session: DiscussionSession, output: SpeakerOutput) -> SpeakerOutput:
+        def fingerprint(issue: Issue):
+            def clean(value):
+                return re.sub(r"[\s。！？；.!?;，,：:*]+", "", value or "").casefold()
+            return (issue.topic_id, issue.kind, clean(issue.summary), clean(issue.closure_condition))
+
+        earlier: dict[tuple, set[int]] = {}
+        for issue in session.issues.values():
+            if issue.raised_by == Role.CHALLENGER and issue.input_version == session.input_version:
+                earlier.setdefault(fingerprint(issue), set()).update(issue.source_seqs)
+        accepted = tuple(issue for issue in output.raised_issues
+                         if not set(issue.source_seqs) <= earlier.get(fingerprint(issue), set()))
+        repeated = len(output.raised_issues) - len(accepted)
+        if not repeated:
+            return output
+        return replace(output, raised_issues=accepted, text=f"{output.text}\n\n{repeated} 条异议已有记录且没有新证据，未重新派发。")
+
     def submit_review(self, session: DiscussionSession, review: ReviewResult) -> Decision:
         """评审结论绑定草稿版本与输入版本。"""
 
@@ -1007,6 +1054,9 @@ class DiscussionEngine:
                     return (ReasonCode.INVALID_ISSUE, "问题所属议题与当前议题不一致")
                 if not issue.summary.strip():
                     return (ReasonCode.INVALID_ISSUE, "问题描述不能为空")
+                if issue.kind == DivergenceKind.ROUTINE and (issue.severity == Severity.BLOCKING or issue.needs_user
+                        or issue.user_question or not (issue.proposed_resolution or "").strip() or not (issue.reopen_if or "").strip()):
+                    return (ReasonCode.INVALID_ISSUE, "可逆细节必须有默认做法和重开条件，且不能是阻断问题")
                 if not issue.source_seqs:
                     return (
                         ReasonCode.CHALLENGE_NEEDS_REFERENCE,

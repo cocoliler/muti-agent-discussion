@@ -51,6 +51,38 @@ class RoundLimitTest(unittest.TestCase):
     def setUp(self) -> None:
         self.engine = DiscussionEngine()
 
+    def test_host_decides_only_reversible_issues_and_records_when_to_reopen(self) -> None:
+        session = build_session(self.engine)
+        session.tasks.clear()
+        session.waiting_for = WaitingFor.HOST_DECISION
+        chosen = Issue("I-1", "T1", Role.CHALLENGER, "两种排序都可撤回", Severity.MAJOR,
+                       kind=DivergenceKind.ROUTINE, source_seqs=(1,), proposed_resolution="按时间排序",
+                       reopen_if="用户反馈找不到课程")
+        blocking = replace(chosen, issue_id="I-2", severity=Severity.BLOCKING)
+        value = replace(chosen, issue_id="I-3", kind=DivergenceKind.VALUE)
+        session.issues = {issue.issue_id: issue for issue in (chosen, blocking, value)}
+        for forbidden in (blocking, value):
+            self.assertFalse(self.engine.decide_routine(session, (chosen.issue_id, forbidden.issue_id)).ok)
+            self.assertEqual(chosen.status.value, "open")
+        self.assertTrue(self.engine.decide_routine(session, (chosen.issue_id,)).ok)
+        self.assertEqual(chosen.status.value, "closed")
+        self.assertIn("重开条件：用户反馈找不到课程", session.messages[-1].text)
+        self.assertEqual(session.messages[-1].source_seqs, (1,))
+
+    def test_repeated_objection_is_only_reopened_with_new_evidence(self) -> None:
+        session = build_session(self.engine)
+        original = Issue("old", "T1", Role.CHALLENGER, "重复预约？", Severity.MAJOR,
+                         closure_condition="只保留一条记录。", source_seqs=(1,))
+        session.issues[original.issue_id] = original
+        same = replace(original, issue_id="same", summary="重复预约", closure_condition="只保留一条记录")
+        new_evidence = replace(same, issue_id="new", source_seqs=(1, 2))
+        output = SpeakerOutput("task", session.session_id, Role.CHALLENGER, TaskKind.CHALLENGE,
+                               session.input_version, session.snapshot_ref, session.round_no, "T1", text="复核风险",
+                               raised_issues=(same, new_evidence))
+        filtered = self.engine._remove_repeated_objections(session, output)
+        self.assertEqual(filtered.raised_issues, (new_evidence,))
+        self.assertIn("没有新证据", filtered.text)
+
     def test_directed_round_stops_at_limit(self) -> None:
         session = build_session(self.engine)
         session.tasks.clear()

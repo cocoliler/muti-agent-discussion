@@ -66,6 +66,7 @@ function describeError(error: unknown) {
 }
 
 function describeAgentDiagnostic(role: string, diagnostic: string) {
+  if (diagnostic.startsWith('delivery preflight:')) return `稿件未通过导入预检，重试会修正规格。${diagnostic.replace('delivery preflight: ', '')}`;
   if (diagnostic.includes('scorecard')) return '方案评分未通过校验，重试会检查方案编号和五个评分维度。';
   if (/new_findings|reassessments|closed findings|account for all previous issues/.test(diagnostic)) {
     return '评审记录未通过校验，重试会分开登记新问题和复核历史问题。';

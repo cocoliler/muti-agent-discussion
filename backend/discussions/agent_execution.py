@@ -17,7 +17,7 @@ from discussion_orchestration import (
 )
 from spec_handoff.draft import DraftSpec
 
-from backend.roles.contracts import CandidateOption, DraftSnapshot, PriorIssue, RoleRequest, SourceMessage
+from backend.roles.contracts import CandidateOption, DraftSnapshot, PriorIssue, RoleRequest, SourceMessage, build_draft_content
 from backend.roles.provider import DeepSeekProvider
 from backend.roles.runner import RoleRunner
 from backend.roles.simulation import SimulationProvider
@@ -176,7 +176,10 @@ class AgentExecution:
                 and not session.tasks and session.current_item() is not None):
             item = session.current_item()
             issues = session.open_issues(item.topic_id)
-            if any(issue.needs_user for issue in issues):
+            routine = [issue.issue_id for issue in issues if issue.kind == DivergenceKind.ROUTINE and not issue.needs_user]
+            if routine:
+                proposal = {"action": "decide_routine", "issue_ids": routine}
+            elif any(issue.needs_user for issue in issues):
                 issues = [issue for issue in issues if issue.needs_user]
                 questions = list(dict.fromkeys(
                     issue.user_question
@@ -208,6 +211,8 @@ class AgentExecution:
                             and current.last_seq == session.last_seq and current.input_version == session.input_version,
                             owner=owner, allow_rejection=True):
                 session, _ = service._load(session.session_id)
+                if routine:
+                    return self._next_jobs(service, session, owner)
         return self._jobs(session)
 
     def _jobs(self, session) -> list[Job]:
@@ -248,10 +253,14 @@ class AgentExecution:
                             and issue.response and issue.response_seq in visible and issue.issue_id not in known]
                 peer_answers = [issue for issue in answered if issue.raised_by == Role.CHALLENGER
                                 and issue.topic_id == task.topic_id]
+                decisions = [issue for issue in session.issues.values() if issue.kind == DivergenceKind.ROUTINE
+                             and issue.input_version == session.input_version and issue.topic_id == task.topic_id
+                             and issue.closed_by_seq in visible and issue.issue_id not in known]
                 issues.extend(
                     self._prior_issue(visible, issue, issue.assignee.value)
                     for issue in [*(item for item in answered if item.raised_by == Role.USER), *peer_answers[-8:]]
                 )
+                issues.extend(self._prior_issue(visible, issue, "recorder") for issue in decisions[-8:])
             parent = draft if all_messages else None
             # 回答被替换后只能使用新的可见消息重建正文；旧评审项仍要逐项复核。
             if previous and issues and (not replaced or previous.input_version == session.input_version):
@@ -466,7 +475,8 @@ class AgentExecution:
                      "kind": item["divergence"], "user_question": item["user_question"],
                      "summary": item["description"], "source_seqs": item["source_seqs"],
                      "assignee": ENGINE_ROLES.get(item["owner_role"], item["owner_role"]),
-                     "closure_condition": item["verification"]}
+                     "closure_condition": item["verification"], "proposed_resolution": item.get("proposed_resolution"),
+                     "reopen_if": item.get("reopen_if")}
                     for index, item in enumerate(objections, 1)
                 ]
                 payload["source_seqs"] = list(dict.fromkeys([
@@ -508,11 +518,7 @@ class AgentExecution:
                     str(option.get("option_id", "")) for option in payload["scorecard"]["options"]
                 ]
             elif task.kind == TaskKind.DRAFT:
-                content = output["content"]
-                payload["draft_content"] = {**content, "requirements": [
-                    {**item, "source_seqs": output["source_map"][item["id"]]} for item in content["requirements"]
-                ], "removed_requirement_ids": [change["previous_id"] for change in output["requirement_changes"]
-                                                if change["previous_id"] not in output["source_map"]]}
+                payload["draft_content"] = build_draft_content(output)
                 payload["item_refs"] = list(output["source_map"])
                 # 分歧记录随草稿版本落库，导出 DesignSpecContent 时不会带出。
                 payload["agreements"] = output.get("agreements", [])

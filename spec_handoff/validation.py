@@ -19,7 +19,7 @@ from typing import Any, Mapping, Sequence
 
 from .codes import Code, Finding, Level, blocking
 from .draft import DraftSpec
-from .schema import check_content
+from .export import check_export
 
 
 @dataclass(frozen=True)
@@ -228,7 +228,7 @@ def build_report(
 
     content = draft.to_content()
     findings: list[Finding] = list(draft.findings)
-    findings.extend(check_content(content))
+    findings.extend(check_export(content))
     findings.extend(check_acceptance(draft))
     findings.extend(check_id_stability(draft, parent))
     seqs: Sequence[int] | None = known_seqs

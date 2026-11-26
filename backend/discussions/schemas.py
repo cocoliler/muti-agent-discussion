@@ -106,6 +106,8 @@ class DraftSummary(_Strict):
     input_version: int
     open_issue_ids: list[str] = Field(default_factory=list)
     review_verdict: str | None = None
+    delivery_status: Literal["pending_review", "invalid", "blocked_review", "ready"] | None = None
+    delivery_errors: list[dict[str, Any]] = Field(default_factory=list)
     content: dict[str, Any] = Field(default_factory=dict)
     #: 记录员保留的共识、备选项与未收敛分歧，仅用于展示，不进入导出正文。
     agreements: list[str] = Field(default_factory=list)

@@ -49,6 +49,13 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
     ? `/api/v1${discussionPath(session.id)}/export?draft_id=${encodeURIComponent(selected!.draft_id)}`
     : receipt?.export_url;
   const verdict = reviews.at(-1)?.verdict ?? draft?.review_verdict;
+  const deliveryLabels = {
+    pending_review: '导入预检通过，待评审',
+    blocked_review: '导入预检通过，评审阻断仍待处理',
+    invalid: '导入预检未通过',
+    ready: '已通过 FlowStudio 导入预检',
+  };
+  const deliveryLabel = draft?.delivery_status ? deliveryLabels[draft.delivery_status] : '等待导入预检';
   const canUseReviewReasons = verdict === 'revise';
   const comparing = comparison && !!priorDraft && !!draft;
   const scorecard = draft?.scorecard;
@@ -227,10 +234,14 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
             </div>)}
         </details>}
       {draft && <div className="spec-export">
-        <button type="button" onClick={() => void exportDraft()} disabled={exporting || busy}>
-          {exporting ? '正在导出…' : '导出 JSON'}
+        <button type="button" onClick={() => void exportDraft()} disabled={exporting || busy || draft.delivery_status === 'invalid'}>
+          {exporting ? '正在导出…' : draft.delivery_status === 'ready' ? '导出 JSON' : '导出预览 JSON'}
         </button>
-        <span>可直接导入 FlowStudio</span>
+        <span>{deliveryLabel}</span>
+        {!!draft.delivery_errors?.length && <details className="draft-context">
+          <summary>查看预检问题</summary>
+          <ul>{draft.delivery_errors.map((issue, index) => <li key={index}>{issue.path} {issue.message}</li>)}</ul>
+        </details>}
         {exportError && <p role="alert">{exportError}</p>}
       </div>}
       {draft && <details className="draft-context"><summary>草稿正文 JSON</summary><pre>{JSON.stringify(draft.content, null, 2)}</pre></details>}

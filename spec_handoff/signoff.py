@@ -160,7 +160,7 @@ def sign_off(
 
     spec = DraftSpec.parse(draft.content)
     report = build_report(spec, session=session, parent=parent_draft(session.drafts, draft))
-    findings.extend(report.findings)
+    findings.extend(report.errors)
     if findings:
         return SignOffResult(ok=False, findings=tuple(findings), report=report)
 
