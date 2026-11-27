@@ -146,6 +146,34 @@ class DiscussionService:
         session, meta = self._load(session_id)
         return self._render(session, meta)
 
+    def activity_marker(self, session_id: str) -> tuple[Any, ...]:
+        try:
+            return self.repo.activity_marker(session_id)
+        except NotFound as exc:
+            raise ApiError("NOT_FOUND", "找不到讨论会话", status=404) from exc
+
+    def activity(self, session_id: str, before: int | None, limit: int) -> dict[str, Any]:
+        self._meta(session_id)
+        rows = self.repo.list_public_attempts(session_id, before, limit + 1)
+        items = rows[:limit]
+        return {"items": items, "next_cursor": items[-1]["id"] if len(rows) > limit else None}
+
+    def issue(self, session_id: str, issue_id: str) -> dict[str, Any]:
+        session, _ = self._load(session_id)
+        issue = session.issues.get(issue_id)
+        if issue is None:
+            raise ApiError("NOT_FOUND", "没有找到此问题的记录", status=404)
+        return {
+            "issue_id": issue.issue_id,
+            "summary": issue.summary,
+            "status": issue.status.value,
+            "input_version": issue.input_version,
+            "source_seqs": issue.source_seqs,
+            "closure_condition": getattr(issue, "closure_condition", None),
+            "response_seq": getattr(issue, "response_seq", None),
+            "closed_by_seq": getattr(issue, "closed_by_seq", None),
+        }
+
     def messages(self, session_id: str, after_seq: int, limit: int) -> dict[str, Any]:
         meta = self._meta(session_id)
         items, has_more = self.repo.list_messages_after(session_id, after_seq, limit)

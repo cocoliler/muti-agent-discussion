@@ -70,6 +70,17 @@ export type Scorecard = {
 export type Finding = { code?: string; path?: string; message?: string; finding_id?: string;
   target_item?: string; summary?: string; severity?: string; close_condition?: string; responsible_role?: string };
 
+export type IssueDetail = {
+  issue_id: string;
+  summary: string;
+  status: string;
+  input_version: number;
+  source_seqs: number[];
+  closure_condition: string | null;
+  response_seq: number | null;
+  closed_by_seq: number | null;
+};
+
 export type LocalDiscussion = {
   id: string;
   project_id: string;
@@ -80,6 +91,22 @@ export type LocalDiscussion = {
 };
 
 export type LocalDiscussionPage = { items: LocalDiscussion[]; next_cursor: string | null };
+
+export type ActivityAttempt = {
+  id: number;
+  logical_task_id: string;
+  attempt_no: number;
+  role: string;
+  task_kind: string;
+  input_version: number;
+  status: string;
+  started_at: string | null;
+  finished_at: string | null;
+  elapsed_seconds: number | null;
+  error_code: string | null;
+};
+
+export type ActivityPage = { items: ActivityAttempt[]; next_cursor: number | null };
 
 export type Session = {
   export_url?: string | null;

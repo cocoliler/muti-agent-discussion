@@ -66,6 +66,31 @@ class RoleContractTests(unittest.TestCase):
                 "stances": [{"option_id": "A", "position": "conditional", "reason": "需验证"}],
             })
 
+    def test_review_retains_complete_user_facing_paragraphs(self):
+        prose = (
+            "这版可以继续推进。首版只做一次计算两个数的网页版本，手机和电脑都能完成基本操作。"
+            "这个范围已经明确，先把计算结果和出错提示做到一致。\n\n"
+            "交付前请补齐桌面端的验收条件。明确用 Tab 键会依次经过哪些控件，"
+            "并记下窗口缩到多窄时，按钮和结果仍然不会重叠。还需要写出计算结果的数值上限，"
+            "并说明输入刚好达到上限和超过上限时，用户分别会看到什么。"
+        )
+        self.assertGreater(len(prose), 160)
+        result = self.check(task("reviewer", draft=frozen()), review(plain_summary=prose))
+        self.assertEqual(result.plain_summary, prose)
+
+    def test_specialist_statement_ignores_extra_annotations_and_validates_evidence(self):
+        req = task("architect", kind="statement")
+        payload = {"text": "并发请求应共用同一个事务约束。", "source_seqs": [7], "basis": "evidence",
+                   "recommendations": ["额外输出"], "owner_role": "host"}
+        result = self.check(req, payload).model_dump()
+        self.assertEqual(result["source_seqs"], [7])
+        self.assertNotIn("recommendations", result)
+        self.assertNotIn("owner_role", result)
+        with self.assertRaisesRegex(RoleRuleError, "source_seqs"):
+            self.check(req, dict(payload, source_seqs=[999]))
+        with self.assertRaisesRegex(RoleRuleError, "assigned task kind"):
+            self.check(req, dict(payload, responses=[{"issue_id": "I-1"}]))
+
     def test_specialist_tasks_use_only_the_assigned_structured_field(self):
         candidates = [{"option_id": key, "title": f"方案 {key}"} for key in ("A", "B")]
         stances = [dict(option_id=key, position="conditional", reason="需复核边界", source_seqs=[7]) for key in ("A", "B")]

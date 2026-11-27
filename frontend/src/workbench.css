@@ -64,6 +64,20 @@
 .task-metadata dt { color: var(--muted); }
 .task-metadata dd { margin: 0; overflow-wrap: anywhere; }
 .task-dialog h3 { margin-top: 15px; font-size: 14px; }
+.issue-dialog p { overflow-wrap: anywhere; white-space: pre-wrap; }
+.issue-dialog .issue-summary { margin-top: 12px; line-height: 1.65; }
+.workbench-shell button.inline-issue-reference {
+  display: inline;
+  padding: 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+.workbench-shell button.inline-issue-reference:hover { background: var(--accent-surface); }
 .clarification-card { margin-block: 18px 8px; padding: 16px 18px 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--raised); }
 .message-body .clarification-card { margin-block: 10px 0; padding: 12px; }
 .workbench-shell .message-edit { flex-shrink: 0; padding: 3px 7px; color: var(--accent); font-size: 12px; }
@@ -157,6 +171,65 @@
 .workbench-shell .project-settings label { margin-top: 9px; }
 .workbench-shell summary { color: var(--accent); font-size: 13px; cursor: pointer; }
 .workbench-shell .message { border-color: var(--border); padding: 16px 0; }
+.workbench-shell .message.agent-card { padding: 12px 0; }
+.workbench-shell .message.decision-card, .workbench-shell .message.summary-card {
+  margin-block: 10px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.workbench-shell .message.decision-card { border-inline-start: 3px solid var(--accent); }
+.workbench-shell .message.summary-card { border-inline-start: 3px solid var(--success); }
+.discussion-mode { display: flex; gap: 5px; align-items: center; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.discussion-mode select {
+  background: var(--raised);
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  color: var(--ink);
+  font: inherit;
+  padding: 5px 6px;
+}
+.workbench-artifact, .discussion-activity {
+  width: min(calc(100% - 24px), 760px);
+  margin-inline: auto;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.workbench-artifact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+  margin-block-start: 8px;
+  padding: 8px 12px;
+  border-color: var(--accent-border);
+}
+.workbench-artifact > div:first-child { display: grid; gap: 2px; overflow-wrap: anywhere; }
+.workbench-artifact span, .workbench-artifact a, .workbench-artifact button { font-size: 12px; }
+.workbench-artifact span { color: var(--muted); }
+.workbench-artifact button, .discussion-activity button { padding: 4px 7px; }
+.discussion-activity { padding: 7px 10px; font-size: 12px; }
+.activity-heading, .activity-roles { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; }
+.activity-heading > span { color: var(--muted); }
+.activity-heading .activity-mode { margin-inline-start: auto; }
+.activity-roles, .activity-history ul, .activity-preview { list-style: none; padding: 0; margin: 4px 0; }
+.activity-roles button { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.discussion-activity details { margin-top: 4px; }
+.activity-history { max-height: min(25dvh, 220px); overflow: auto; margin-block: 5px; }
+.activity-history section + section { margin-top: 7px; }
+.activity-history h3 { font-size: 12px; }
+.activity-attempt { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 9px; padding: 2px 0; color: var(--muted); }
+.activity-attempt code { color: var(--danger); overflow-wrap: anywhere; }
+[data-activity-status='running'] { color: var(--accent); }
+[data-activity-status='succeeded'], [data-activity-status='done'] { color: var(--success); }
+[data-activity-status='failed'], [data-activity-status='timed_out'], [data-activity-status='abandoned'] { color: var(--danger); }
+.progress-events { margin-block: 8px; padding: 7px 10px; border-inline-start: 2px solid var(--border); color: var(--muted); font-size: 12px; }
+.progress-events > div { display: flex; gap: 8px; padding: 3px 0; white-space: pre-wrap; }
+.progress-events > div p { overflow-wrap: anywhere; }
 .workbench-shell .message-body p { color: var(--ink); }
 .clarification-replies { display: grid; gap: 10px; }
 .discussion-message-text { display: grid; gap: 12px; margin-top: 7px; max-width: 670px; color: var(--ink); font-size: 14px; line-height: 1.7; }
@@ -165,7 +238,7 @@
 .discussion-message-text ul, .discussion-message-text ol { margin: 4px 0 6px; padding-inline-start: 20px; }
 .discussion-message-text li { padding-inline-start: 2px; overflow-wrap: anywhere; }
 .discussion-message-text li + li { margin-top: 2px; }
-.workbench-shell .agent-message-preview { white-space: normal; }
+.workbench-shell .agent-message-prose p + p { margin-top: 10px; }
 .agent-message-details { margin-top: 8px; }
 .agent-message-details[open] { padding-inline-start: 10px; border-inline-start: 2px solid var(--border); }
 .agent-message-details[open] > summary { margin-bottom: 8px; }
@@ -242,6 +315,8 @@
   font-size: 20px;
   line-height: 1;
 }
+.workbench-shell .composer-revision-submit { margin-inline-start: auto; }
+.composer-toolbar > span.composer-context { white-space: normal; }
 .workbench-shell .live-form input:not([type='checkbox'], [type='radio']), .workbench-shell .live-form textarea, .workbench-shell .live-form select {
   border-color: var(--control-border);
   color: var(--ink);
@@ -269,7 +344,9 @@
 .workbench-shell .requirement ul { color: var(--ink); }
 .workbench-shell .requirement .removed { background: var(--danger-surface); color: var(--danger); }
 .workbench-shell .requirement .added { background: var(--success-surface); color: var(--success); }
-.review-finding { border-top: 1px solid var(--border); padding-top: 10px; }
+.review-findings { margin: 8px 0 0; padding-inline-start: 22px; }
+.review-findings .review-finding { margin-top: 8px; }
+.review-finding + .review-finding { border-top: 1px solid var(--border); padding-top: 8px; }
 .review-finding button { padding: 3px 6px; color: var(--accent); }
 .review-finding p { margin-top: 6px; }
 .spec-actions { display: grid; gap: 10px; padding: 12px 16px; background: var(--surface); border-top: 1px solid var(--border); }

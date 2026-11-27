@@ -244,6 +244,36 @@ class MessagePage(_Strict):
     next_cursor: str | None = None
 
 
+class ActivityAttempt(_Strict):
+    id: int
+    logical_task_id: str
+    attempt_no: int
+    role: str
+    task_kind: str
+    input_version: int
+    status: str
+    started_at: str | None
+    finished_at: str | None
+    elapsed_seconds: float | None
+    error_code: str | None
+
+
+class ActivityPage(_Strict):
+    items: list[ActivityAttempt]
+    next_cursor: int | None
+
+
+class IssueDetail(_Strict):
+    issue_id: str
+    summary: str
+    status: str
+    input_version: int
+    source_seqs: list[int]
+    closure_condition: str | None = None
+    response_seq: int | None = None
+    closed_by_seq: int | None = None
+
+
 class DecisionEnvelope(_Strict):
     decision: DecisionView
     session: SessionView | None = None

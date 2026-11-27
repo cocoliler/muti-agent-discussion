@@ -195,6 +195,26 @@ class RoundLimitTest(unittest.TestCase):
         self.assertEqual(session.messages[-1].item_refs, (draft.draft_id,))
         self.assertEqual(session.round_kind, RoundKind.REVISION)
 
+    def test_returning_a_draft_keeps_review_suggestions_and_adds_user_feedback(self):
+        session = build_session(self.engine)
+        session.tasks.clear()
+        session.status = SessionStatus.REVIEWING
+        session.waiting_for = WaitingFor.REVIEW
+        draft = DraftRevision("d-with-suggestions", 1, session.input_version, {})
+        session.drafts.append(draft)
+        finding = ReviewFinding("F1", Severity.MAJOR, "FR-1", "补齐冲突验收条件", "可复现冲突", Role.ARCHITECT)
+        review = ReviewResult("r-with-suggestions", session.session_id, draft.draft_id,
+                              session.input_version, Verdict.REVISE, findings=(finding,))
+        self.assertTrue(self.engine.submit_review(session, review).ok)
+
+        feedback = "增加冲突后的备选时间提示"
+        returned = self.engine.require_changes(session, feedback, draft_id=draft.draft_id)
+        self.assertTrue(returned.ok, returned.code)
+        assigned = {task.role: [session.issues[issue_id].summary for issue_id in task.issue_ids]
+                    for task in returned.tasks}
+        self.assertEqual(assigned, {Role.ARCHITECT: [finding.summary], Role.PRODUCT: [feedback]})
+        self.assertIn(feedback, session.messages[-1].text)
+
     def test_cosmetic_changes_stall_but_new_acceptance_rules_do_not(self):
         session = build_session(self.engine)
         finding = ReviewFinding("issue-1", Severity.BLOCKING, "FR-1", "验收含糊", "说明验收条件", Role.PRODUCT)

@@ -1,10 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api, deleteDiscussion, discussionPath, readMessages } from './discussions';
 import type { Action, ClarificationAnswer, Decision, Finding, Handoff, Message, Session, Task } from './discussions';
 import { DiscussionSpec } from './DiscussionSpec';
 import { ClarificationForm } from './ClarificationForm';
-import { AgentMessageText, DiscussionMessageText } from './DiscussionMessageText';
+import { AgentMessageText, DiscussionMessageText, IssueLinkContext } from './DiscussionMessageText';
+import { IssueReferenceDialog } from './IssueReferenceDialog';
 import { LocalDiscussionHistory } from './LocalDiscussionHistory';
+import { ReviewFindings } from './ReviewFindings';
+import { ArtifactCard, ProgressEvents, SpeechCard } from './DiscussionCards';
+import { DiscussionActivity } from './DiscussionActivity';
+import { discussionArtifact, displayModes, timelineEntries, visibleMessages } from './discussionTimeline';
+import type { DisplayMode } from './discussionTimeline';
 import './workbench.css';
 
 const statusLabels: Record<string, string> = {
@@ -32,7 +38,7 @@ const roleColors: Record<string, string> = {
 };
 const participantLabels: Record<string, string> = {
   queued: '待执行', running: '进行中', done: '已发言', succeeded: '已完成', failed: '失败',
-  pending: '待执行', ignored: '已忽略', abandoned: '已放弃', timed_out: '已超时',
+  pending: '待执行', ignored: '已忽略', abandoned: '已放弃', timed_out: '已超时', cancelled: '已取消',
 };
 const kindLabels: Record<string, string> = {
   user_input: '用户输入', agenda: '议题', clarification: '澄清', statement: '角色建议', challenge: '质疑',
@@ -42,6 +48,7 @@ const taskLabels = { ...kindLabels, statement: '专业角色发言', integration
 const storageKey = 'design-room.discussion';
 const projectKey = 'design-room.project';
 const specVisibilityKey = 'design-room.spec-visibility';
+const displayModeKey = 'design-room.discussion-display';
 const defaultActions = [
   ['submit_agenda', '提交主持人议题'], ['propose', '提交主持人调度'],
   ['submit_output', '提交角色结果'], ['submit_review', '提交评审结论'], ['abandon_task', '放弃角色任务'],
@@ -89,8 +96,9 @@ function previousAnswers(text: string): ClarificationAnswer[] {
     : [{ question: '你想补充什么？', answer: text, options: [] }];
 }
 
-function distanceFromThreadBottom(list: HTMLDivElement) {
-  return list.scrollHeight - list.scrollTop - list.clientHeight;
+function isAtThreadBottom(list: HTMLDivElement) {
+  // scrollTop can be fractional, while scrollHeight and clientHeight are rounded.
+  return list.scrollHeight - list.scrollTop - list.clientHeight < 2;
 }
 
 function usesAgentPreview(message: Message) {
@@ -112,6 +120,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskSelection, setTaskSelection] = useState<{ role: string; task?: Task } | null>(null);
+  const [selectedIssue, setSelectedIssue] = useState<string | null>(null);
   const taskDialog = useRef<HTMLDialogElement>(null);
   const [handoff, setHandoff] = useState<Handoff | null>(null);
   const [idea, setIdea] = useState('');
@@ -119,7 +128,12 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [reply, setReply] = useState<number | null>(null);
   const [substantive, setSubstantive] = useState(true);
   const [highlight, setHighlight] = useState<number | null>(null);
-  const [itemRef, setItemRef] = useState<{ value: string } | null>(null);
+  const [mode, setMode] = useState<DisplayMode>(() => {
+    const saved = readStorage(displayModeKey);
+    return saved === 'standard' || saved === 'detailed' ? saved : 'compact';
+  });
+  const [activityRevision, setActivityRevision] = useState(0);
+  const [itemRef, setItemRef] = useState<{ value: string | null } | null>(null);
   const [specCollapsed, setSpecCollapsed] = useState(() => readStorage(specVisibilityKey) === 'collapsed');
   const revealSpec = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState(false);
@@ -127,13 +141,30 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [readError, setReadError] = useState('');
   const [findings, setFindings] = useState<Finding[]>([]);
   const [answerToEdit, setAnswerToEdit] = useState<number | null>(null);
+  const [revision, setRevision] = useState<{ draftId: string; text: string; reopen?: boolean } | null>(null);
   const [action, setAction] = useState<Action | ''>('');
   const [payload, setPayload] = useState('');
   const [agendaDraft, setAgendaDraft] = useState<{ version: number; text: string } | null>(null);
   const thread = useRef<HTMLDivElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const [canJumpToBottom, setCanJumpToBottom] = useState(false);
   const [activeRound, setActiveRound] = useState<number | null>(null);
-  const roundStarts = useMemo(() => discussionRoundStarts(messages), [messages]);
+  const shownMessages = useMemo(() => visibleMessages(messages, mode, highlight), [messages, mode, highlight]);
+  const timeline = useMemo(() => timelineEntries(shownMessages), [shownMessages]);
+  const taskResults = useMemo(() => new Map(messages.flatMap((message) => message.task_id ? [[message.task_id, message.seq] as const] : [])), [messages]);
+  const roundStarts = useMemo(() => discussionRoundStarts(shownMessages), [shownMessages]);
+  const reviews = session?.reviews;
+  const reviewsByMessage = useMemo(() => {
+    const entries = new Map<number, Session['reviews'][number]>();
+    let index = 0;
+    // The engine appends one independent review message for each review record, in the same order.
+    for (const message of messages) {
+      if (message.role !== 'reviewer' || message.kind !== 'review') continue;
+      const review = reviews?.[index++];
+      if (review) entries.set(message.seq, review);
+    }
+    return entries;
+  }, [messages, reviews]);
   const projectIdeaField = useRef<HTMLTextAreaElement>(null);
   const sessionRead = useRef<AbortController | null>(null);
   const shouldScroll = useRef(true);
@@ -141,9 +172,9 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const pending = useRef<{ signature: string; key: string } | null>(null);
 
   const updateThreadPosition = useCallback((list: HTMLDivElement) => {
-    const distance = distanceFromThreadBottom(list);
-    setCanJumpToBottom(distance > 24);
-    if (distance < 2) {
+    const atBottom = isAtThreadBottom(list);
+    setCanJumpToBottom(!atBottom);
+    if (atBottom) {
       setActiveRound(roundStarts.at(-1)?.[0] ?? null);
       return;
     }
@@ -163,14 +194,19 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     sessionRead.current = controller;
     let cursor = 0;
     let inflight: Promise<void> | null = null;
+    let resync = false;
     function sync() {
       if (controller.signal.aborted) return Promise.resolve();
-      inflight ??= (async () => {
+      if (inflight) { resync = true; return inflight; }
+      inflight = (async () => {
         try {
           const next = await api<Session>(discussionPath(id!), undefined, undefined, controller.signal);
           const batch = next.last_seq > cursor ? await readMessages(id!, cursor, controller.signal) : [];
           if (controller.signal.aborted) return;
-          setSession((current) => current?.id === next.id && current.state_version > next.state_version ? current : next);
+          setSession((current) => current?.id === next.id && (current.state_version > next.state_version || (
+            current.state_version === next.state_version && current.export_url === next.export_url &&
+            JSON.stringify(current.participants) === JSON.stringify(next.participants)
+          )) ? current : next);
           if (batch.length) {
             cursor = batch[batch.length - 1].seq;
             setMessages((current) => [...current, ...batch]);
@@ -184,19 +220,35 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
             setSession(null);
             setMessages([]);
             setTaskSelection(null);
+            setSelectedIssue(null);
           }
           setReadError(describeError(cause));
         }
-      })().finally(() => { inflight = null; });
+      })().finally(() => {
+        inflight = null;
+        if (resync) { resync = false; void sync(); }
+      });
       return inflight;
     }
     refresh.current = sync;
     void sync();
-    const timer = window.setInterval(() => void sync(), 2500);
-    return () => { controller.abort(); window.clearInterval(timer); };
+    const stream = typeof EventSource === 'undefined' ? null : new EventSource(`/api/v1${discussionPath(id)}/events`);
+    function syncActivity() {
+      setActivityRevision((value) => value + 1);
+      void sync();
+    }
+    stream?.addEventListener('change', syncActivity);
+    let fallbackTicks = 0;
+    const timer = window.setInterval(() => {
+      if (!stream || stream.readyState !== EventSource.OPEN || ++fallbackTicks >= 6) {
+        fallbackTicks = 0;
+        syncActivity();
+      }
+    }, 2500);
+    return () => { controller.abort(); stream?.close(); window.clearInterval(timer); };
   }, [id]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const list = thread.current;
     if (!list) return;
     if (shouldScroll.current) {
@@ -228,11 +280,13 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     setMessages([]);
     setTasks([]);
     setTaskSelection(null);
+    setSelectedIssue(null);
     setHandoff(null);
     setError('');
     setReadError('');
     setFindings([]);
     setAnswerToEdit(null);
+    setRevision(null);
     setIdea('');
     setText('');
     setReply(null);
@@ -268,7 +322,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     });
   }
 
-  function showReference(value: string) {
+  function showReference(value: string | null) {
     setSpecVisibility(false);
     setItemRef({ value });
   }
@@ -332,9 +386,12 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
 
   function locate(seq: number) {
     setHighlight(seq);
-    const target = document.getElementById(`message-${seq}`);
-    target?.focus({ preventScroll: true });
-    target?.scrollIntoView({ block: 'nearest' });
+    shouldScroll.current = false;
+    requestAnimationFrame(() => {
+      const target = document.getElementById(`message-${seq}`);
+      target?.focus({ preventScroll: true });
+      target?.scrollIntoView({ block: 'nearest' });
+    });
   }
 
   function messageReferences(message: Message) {
@@ -343,7 +400,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     return <div className="references">
       {sources.map((seq) => <button key={seq} onClick={() => locate(seq)} aria-label={`定位消息 ${seq}`}>#{seq}</button>)}
       {message.item_refs?.map((item) => <button key={item} onClick={() => showReference(item)}>{item}</button>)}
-      {message.issue_ids?.map((issue) => <span key={issue}>{issue}</span>)}
+      {message.issue_ids?.map((issue) => <button key={issue} type="button" onClick={() => setSelectedIssue(issue)}>{issue}</button>)}
     </div>;
   }
 
@@ -381,6 +438,11 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
 
   const terminal = session?.status === 'completed' || session?.status === 'canceled';
   const paused = session?.status === 'paused';
+  const replyButton = useCallback((seq: number) => session && !terminal && !paused ?
+    <button type="button" disabled={busy} onClick={() => {
+      setReply(seq);
+      composer.current?.focus({ preventScroll: true });
+    }}>回复 #{seq}</button> : null, [!!session, terminal, paused, busy]);
   const supersededAnswers = new Set(session?.superseded_answer_seqs ?? []);
   const promptsBySeq = new Set(messages.filter((message) => message.kind === 'clarification').map((message) => message.seq));
   const latestAnswers = new Map<number, Message>();
@@ -409,9 +471,25 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     ? message.task_id === selectedTask.task_id || selectedTask.message_seqs?.includes(message.seq)
     : message.role === taskSelection.role).slice(-5) : [];
   const activeDraft = session?.active_draft;
+  const artifact = discussionArtifact(session);
   const canConfirm = session?.status === 'awaiting_confirmation' && activeDraft != null
     && (activeDraft.review_verdict === 'pass' || activeDraft.review_verdict === 'revise')
     && activeDraft.input_version === session.input_version;
+  const currentReview = reviews?.filter((review) => review.draft_id === activeDraft?.draft_id).at(-1);
+  const currentReviewSeq = activeDraft && (canConfirm || session?.status === 'completed')
+    ? [...reviewsByMessage].find(([, review]) => review === currentReview)?.[0] : undefined;
+  const canReopen = session?.status === 'completed' && activeDraft != null;
+  const revisionDraft = revision?.draftId === activeDraft?.draft_id ? revision : null;
+  const reopening = canReopen && !!revisionDraft?.reopen;
+  const revisionTarget = (canConfirm && reply === null) || reopening ? activeDraft : null;
+  const revisionText = revisionDraft?.text ?? '';
+  const canUseReviewReasons = activeDraft?.review_verdict === 'revise';
+
+  function openRevision() {
+    if (!canReopen || busy) return;
+    setRevision({ draftId: activeDraft.draft_id, text: revisionText, reopen: true });
+    requestAnimationFrame(() => composer.current?.focus({ preventScroll: true }));
+  }
   const awaitingClarification = session?.status === 'clarifying' && session.waiting_for === 'user_input';
   const clarificationMessage = awaitingClarification ? messages.filter((message) => message.kind === 'clarification'
     && (message.input_version === undefined || message.input_version === session.input_version)).at(-1) : undefined;
@@ -453,7 +531,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
         : session?.status === 'awaiting_confirmation' ? (activeDraft?.review_verdict === 'revise' ? '建议修订，可签收或退回' : '待签收或退回')
           : session && waitingLabels[session.waiting_for];
 
-  return <div className="shell workbench-shell">
+  return <IssueLinkContext.Provider value={setSelectedIssue}><div className="shell workbench-shell">
     <header className="topbar">
       <div className="brand"><span className="brand-icon" aria-hidden="true">✳</span><div><strong>Design Room</strong><small>多 Agent 需求工作台</small></div></div>
       <div className="top-actions"><button disabled={busy} onClick={openDemo}>会议室演示</button></div>
@@ -531,11 +609,18 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
         <header className="pane-title"><div><h1>项目讨论</h1>{session?.phase && <p>{phaseLabels[session.phase] ?? session.phase}</p>}</div>
           {(session || specCollapsed) && <div className="pane-actions">
             {session && <span className="count">{session.last_seq} 条消息</span>}
+            {id && <label className="discussion-mode">显示模式<select aria-label="消息展示模式" value={mode}
+              onChange={(event) => {
+                const next = event.target.value as DisplayMode;
+                setMode(next);
+                saveStorage(displayModeKey, next);
+              }}>{Object.entries(displayModes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}
             {specCollapsed
               ? <button type="button" className="spec-toggle" ref={revealSpec} aria-controls="live-spec-panel"
                   aria-expanded={false} onClick={showSpec}>展开规格</button>
               : <a href="#live-spec-title">查看规格</a>}
           </div>}</header>
+        {session && artifact && <ArtifactCard event={artifact} sessionId={session.id} open={() => showReference(null)} />}
         <div className="thread-pane">
           {id && roundStarts.some(([round]) => round > 0) && <nav className="round-nav" aria-label="聊天轮次">
             {roundStarts.map(([round, message]) => {
@@ -548,11 +633,16 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
           <div ref={thread} id="discussion-thread" className="thread" role="region" aria-label="讨论消息" tabIndex={-1}
             onScroll={(event) => {
               const list = event.currentTarget;
-              shouldScroll.current = distanceFromThreadBottom(list) < 80;
+              shouldScroll.current = isAtThreadBottom(list);
               updateThreadPosition(list);
             }}>
-            {id ? messages.map((message) => <article key={message.seq} id={`message-${message.seq}`} tabIndex={-1}
-              className={`message${highlight === message.seq ? ' highlight' : ''}`}>
+            {id ? timeline.map((entry) => {
+              if (entry.type === 'Progress') return <ProgressEvents key={entry.messages[0].seq} event={entry}
+                author={roleLabels[entry.messages[0].role] ?? entry.messages[0].role} highlight={highlight}
+                renderActions={(message) => <>{messageReferences(message)}{replyButton(message.seq)}</>} />;
+              const { message } = entry;
+              const review = reviewsByMessage.get(message.seq);
+              return <Fragment key={message.seq}><SpeechCard type={entry.type} id={`message-${message.seq}`} highlight={highlight === message.seq}>
               <Avatar role={message.role} /><div className="message-body"><header><strong>{roleLabels[message.role] ?? message.role}</strong>
                 <span className="event-label">{supersededAnswers.has(message.seq) ? '答案已替换' : message.substantive === false ? '随手备注' : kindLabels[message.kind] ?? message.kind}</span><span className="sequence">#{message.seq}</span>
                 {editableAnswers.includes(message) && editMessage !== message && <button className="message-edit" disabled={busy}
@@ -575,13 +665,29 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
                       <DiscussionMessageText text={entry.question} formatted />
                       <p><strong>回答</strong> {entry.answer}</p>
                     </div>)}</div>
-                  : usesAgentPreview(message) ? <AgentMessageText text={message.text} plainSummary={message.plain_summary}
+                  : usesAgentPreview(message) ? <AgentMessageText text={message.text} plainSummary={message.plain_summary} detailed={mode === 'detailed'}
                       references={messageReferences(message)} />
                     : <DiscussionMessageText text={message.text} formatted={message.kind === 'clarification'} />}
                   {!usesAgentPreview(message) && messageReferences(message)}
-                  {session && !terminal && !paused && <div className="references message-reply"><button onClick={() => setReply(message.seq)}>回复 #{message.seq}</button></div>}
+                  {canReopen && message.seq === currentReviewSeq && <div className="references">
+                    <button type="button" disabled={busy} onClick={openRevision}>填写修订意见</button>
+                  </div>}
+                  {session && !terminal && !paused && <div className="references message-reply">{replyButton(message.seq)}</div>}
                 </>}
-              </div></article>) : <form className="welcome live-form" onSubmit={(event) => { event.preventDefault(); create(); }}>
+              </div></SpeechCard>
+              {!!review?.findings.length && <article className="message" aria-label={`评审 #${message.seq} 的评审意见`}>
+                <Avatar role="reviewer" />
+                <div className="message-body">
+                  <header><strong>{roleLabels.reviewer}</strong><span className="event-label">评审意见</span></header>
+                  {mode === 'detailed' ? <ReviewFindings findings={review.findings} /> : <details>
+                    <summary>查看评审依据与完成条件（{review.findings.length} 项）</summary>
+                    <ReviewFindings findings={review.findings} />
+                  </details>}
+                  <div className="references"><button type="button" onClick={() => locate(message.seq)}>查看评审结论 #{message.seq}</button></div>
+                </div>
+              </article>}
+              </Fragment>;
+            }) : <form className="welcome live-form" onSubmit={(event) => { event.preventDefault(); create(); }}>
               <h2>你想做什么产品？</h2>
               <label>项目想法<textarea ref={projectIdeaField} required maxLength={4000} rows={4} placeholder="例如：做一个内部会议室预约工具，首版支持查空闲和预约。" value={idea} onChange={(event) => setIdea(event.target.value)} /></label>
               <details className="project-settings"><summary>项目设置</summary><label>项目 ID（UUID）<input value={projectId} onChange={(event) => setProjectId(event.target.value)} /></label></details>
@@ -625,27 +731,51 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
           {id && canJumpToBottom && <button type="button" className="jump-to-bottom" aria-label="跳到最新消息"
             title="跳到最新消息" aria-controls="discussion-thread" onClick={jumpToBottom} />}
         </div>
+        {session && <DiscussionActivity key={session.id} session={session} revision={activityRevision} mode={mode}
+          labels={{ role: roleLabels, status: participantLabels, task: taskLabels }}
+          openRole={(role) => setTaskSelection({ role, task: currentTasks.find((task) => task.role === role) })}
+          results={taskResults} locate={locate} />}
         {((error && !clarificationKey && !editMessage) || readError || findings.length > 0) && <div className="error workbench-error" role="alert">
           {error && !clarificationKey && !editMessage && <p>{error}</p>}{readError && <p>{readError} {id && <button onClick={() => void refresh.current()}>重新读取</button>}</p>}
           {findings.length > 0 && <ul>{findings.map((finding, index) => <li key={index}>
             {finding.path ? <button onClick={() => showReference(finding.path!)}>{finding.path}</button> : finding.code} {finding.message}
           </li>)}</ul>}
         </div>}
-        {session && !terminal && <footer className="workbench-controls">
+        {session && (!terminal || revisionTarget) && <footer className="workbench-controls">
           <form className="discussion-composer" onSubmit={(event) => {
             event.preventDefault();
-            if (paused || !text.trim()) return;
+            if (busy || paused) return;
+            if (revisionTarget) {
+              const reason = revisionText.trim();
+              if (canUseReviewReasons || reason) {
+                act('require_changes', { reason, draft_id: revisionTarget.draft_id }, () => setRevision(null));
+              }
+              return;
+            }
+            if (terminal || !text.trim()) return;
             command('/messages', { text: text.trim(), reply_to_seq: reply, substantive, input_version: session.input_version }, () => { setText(''); setReply(null); });
           }}>
             {!paused && <>
-              {reply !== null && <div className="composer-reply">
+              {revisionTarget ? <div className="composer-reply">
+                {currentReviewSeq !== undefined && <button type="button" onClick={() => locate(currentReviewSeq)}>修订 v{revisionTarget.version} · 查看评审</button>}
+                {reopening && <button type="button" aria-label="退出修订模式" disabled={busy} onClick={() => setRevision(null)}>×</button>}
+              </div> : reply !== null && <div className="composer-reply">
                 <button type="button" onClick={() => locate(reply)}>回复 #{reply}</button>
-                <button type="button" aria-label="取消回复" onClick={() => setReply(null)}>×</button>
+                <button type="button" aria-label="取消回复" disabled={busy} onClick={() => setReply(null)}>×</button>
               </div>}
-              <textarea aria-label="讨论消息" placeholder="输入讨论消息…" rows={1} required maxLength={8000}
-                value={text} onChange={(event) => setText(event.target.value)} />
+              <textarea ref={composer} aria-label={revisionTarget ? '修订意见' : '讨论消息'}
+                placeholder={revisionTarget ? (canUseReviewReasons ? '直接写下修订意见（可选）…' : '写下退回修订的理由…')
+                  : reply !== null ? `回复 #${reply}…` : '输入讨论消息…'}
+                rows={1} required={!revisionTarget || !canUseReviewReasons} maxLength={8000}
+                disabled={!!revisionTarget && busy} value={revisionTarget ? revisionText : text}
+                onChange={(event) => revisionTarget
+                  ? setRevision({ draftId: revisionTarget.draft_id, text: event.target.value, reopen: reopening }) : setText(event.target.value)} />
             </>}
-            <div className="composer-toolbar">
+            {revisionTarget ? <div className="composer-toolbar">
+              {canUseReviewReasons && <span className="composer-context">退回后，Agent 会结合评审意见和你的补充修订。</span>}
+              <button type="submit" className="primary composer-revision-submit"
+                disabled={busy || (!canUseReviewReasons && !revisionText.trim())}>确认退回 v{revisionTarget.version}</button>
+            </div> : <div className="composer-toolbar">
               {!paused && <label className="composer-context">
                 <input type="checkbox" checked={substantive} onChange={(event) => setSubstantive(event.target.checked)} />
                 更新需求上下文
@@ -657,7 +787,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
               {!paused && <button type="submit" className="primary composer-send" aria-label="发送" title="发送" disabled={busy || !text.trim()}>
                 <span aria-hidden="true">↑</span>
               </button>}
-            </div>
+            </div>}
           </form>
         </footer>}
       </main>
@@ -665,7 +795,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
         confirm={canConfirm ? () => command('/confirm', {
           draft_id: activeDraft.draft_id, input_version: session.input_version, spec_expected_revision: 0,
         }) : undefined}
-        requestChanges={activeDraft && (session?.status === 'awaiting_confirmation' || session?.status === 'completed') ? (reason) => act('require_changes', { reason, draft_id: activeDraft?.draft_id }) : undefined} />
+        requestChanges={canReopen ? openRevision : undefined} />
     </div>
     {session && taskSelection && <dialog className="task-dialog" ref={taskDialog} aria-labelledby="task-dialog-title" onClose={() => setTaskSelection(null)}>
       <header className="task-dialog-header">
@@ -693,5 +823,9 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
         </button>
       </li>)}</ul> : <p className="task-detail-note">暂无消息。</p>}
     </dialog>}
-  </div>;
+    {session && selectedIssue && <IssueReferenceDialog key={`${session.id}:${selectedIssue}`} sessionId={session.id}
+      issueId={selectedIssue} related={[...new Set(messages.filter((message) => message.issue_ids?.includes(selectedIssue))
+        .flatMap((message) => [message.seq, ...message.source_seqs]))]}
+      locate={locate} onClose={() => setSelectedIssue(null)} />}
+  </div></IssueLinkContext.Provider>;
 }

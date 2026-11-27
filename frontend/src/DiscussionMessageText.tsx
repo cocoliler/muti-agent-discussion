@@ -1,4 +1,6 @@
+import { createContext, Fragment, memo, useContext } from 'react';
 import type { ReactNode } from 'react';
+import type { DiscussionEvent } from './discussionTimeline';
 
 const headings = [
   '首版架构建议', '架构建议', '首版范围', '核心建议', '主要建议', '建议', '结论', '优先级',
@@ -62,50 +64,66 @@ function blocks(text: string) {
   return result;
 }
 
-export function formatInlineText(text: string) {
-  return text.split(/\*\*([^*\n]+)\*\*/).map((part, index) => (
-    index % 2 === 0 ? part : <strong key={index}>{part}</strong>
-  ));
+type OpenIssue = (id: string) => void;
+export const IssueLinkContext = createContext<OpenIssue | null>(null);
+
+function issueLinks(text: string, openIssue: OpenIssue | null) {
+  if (!openIssue) return text;
+  return text.split(/(?<![A-Za-z0-9_-])(I-\d+-\d+-\d+)(?![A-Za-z0-9_-])/g).map((part, index) =>
+    index % 2 === 0 ? part : <button key={index} type="button" className="inline-issue-reference"
+      aria-label={`查看问题 ${part}`} onClick={() => openIssue(part)}>{part}</button>);
 }
 
-export function DiscussionMessageText({ text, formatted }: { text: string; formatted: boolean }) {
-  if (!formatted) return <p>{text}</p>;
+export function formatInlineText(text: string, openIssue: OpenIssue | null = null) {
+  return text.split(/\*\*([^*\n]+)\*\*/).map((part, index) =>
+    index % 2 === 0 ? <Fragment key={index}>{issueLinks(part, openIssue)}</Fragment>
+      : <strong key={index}>{issueLinks(part, openIssue)}</strong>);
+}
+
+export const DiscussionMessageText = memo(function DiscussionMessageText({ text, formatted }: { text: string; formatted: boolean }) {
+  const openIssue = useContext(IssueLinkContext);
+  if (!formatted) return <p>{issueLinks(text, openIssue)}</p>;
 
   return <div className="discussion-message-text">{sections(text).map((section, sectionIndex) => <div key={sectionIndex}>
-    {section.heading && <h3>{formatInlineText(section.heading)}</h3>}
+    {section.heading && <h3>{formatInlineText(section.heading, openIssue)}</h3>}
     {blocks(section.text).map(({ kind, lines }, index) => {
-      if (kind === 'paragraph') return <div key={index}>{lines.map((line, lineIndex) => <p key={lineIndex}>{formatInlineText(line.text)}</p>)}</div>;
+      if (kind === 'paragraph') return <div key={index}>{lines.map((line, lineIndex) => <p key={lineIndex}>{formatInlineText(line.text, openIssue)}</p>)}</div>;
       const List = kind;
-      return <List key={index}>{lines.map((line, lineIndex) => <li key={lineIndex} value={line.number}>{formatInlineText(line.text)}</li>)}</List>;
+      return <List key={index}>{lines.map((line, lineIndex) => <li key={lineIndex} value={line.number}>{formatInlineText(line.text, openIssue)}</li>)}</List>;
     })}
   </div>)}</div>;
+});
+
+function ThinkingCard({ event, references, detailed }: {
+  event?: Extract<DiscussionEvent, { type: 'Thinking' }>;
+  references?: ReactNode;
+  detailed: boolean;
+}) {
+  if (!event && !references) return null;
+  return <details className="agent-message-details" open={detailed || undefined}>
+    <summary>{event ? '查看分析说明与依据' : '查看引用与关联'}</summary>
+    {event && <DiscussionMessageText text={event.text} formatted />}
+    {references}
+  </details>;
 }
 
-export function AgentMessageText({ text, plainSummary, references }: {
+export function AgentMessageText({ text, plainSummary, references, detailed = false }: {
   text: string;
   plainSummary?: string | null;
   references?: ReactNode;
+  detailed?: boolean;
 }) {
+  const openIssue = useContext(IssueLinkContext);
   const clean = text.trim();
   const summary = plainSummary?.trim();
-  if ((!summary || summary === clean) && clean.length <= 160 && !references) {
-    return <DiscussionMessageText text={text} formatted />;
-  }
-  const opening = (sections(clean)[0]?.text.trim() || clean).replace(/\*\*/g, '');
-  const firstLine = opening.split(/\r?\n/)[0];
-  const firstSentence = firstLine.match(/^.+?(?:[。！？!?]|\.(?=\s|$))/)?.[0] ?? firstLine;
-  const picked = /^收敛评分：[\s\S]*?。采纳 ([^。]+)。/.exec(clean)?.[1];
-  const pickedTitle = picked && clean.split(picked + '「')[1]?.split('」')[0];
-  const preview = summary || (pickedTitle ? `本轮暂选「${pickedTitle}」。` : clean.length <= 160 ? clean : firstSentence);
-  const limit = Array.from(preview);
-  const excerpt = limit.length > 160 ? limit.slice(0, 157).join('') + '…' : preview;
-  const hasMoreText = excerpt !== clean;
+  const legacyLong = !summary && clean.length > 320;
+  const opening = legacyLong ? clean.match(/^[^\n]*?[。！？]/u)?.[0] : undefined;
+  const prose = summary || (opening && opening.length <= 240 ? opening : undefined);
+  const hasMoreText = !!prose ? prose !== clean : legacyLong;
   return <>
-    <p className="agent-message-preview">{formatInlineText(excerpt)}</p>
-    {(hasMoreText || references) && <details className="agent-message-details">
-      <summary>{hasMoreText ? '查看发言详情' : '查看引用与关联'}</summary>
-      {hasMoreText && <DiscussionMessageText text={text} formatted />}
-      {references}
-    </details>}
+    {prose ? <div className="agent-message-prose">
+      {prose.split(/\r?\n\s*\r?\n/).map((paragraph, index) => <p key={index}>{formatInlineText(paragraph, openIssue)}</p>)}
+    </div> : !legacyLong && <DiscussionMessageText text={clean} formatted />}
+    <ThinkingCard event={hasMoreText ? { type: 'Thinking', text: clean } : undefined} references={references} detailed={detailed} />
   </>;
 }

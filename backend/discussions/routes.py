@@ -22,7 +22,8 @@ from typing import Any, Callable
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from spec_handoff import check_export, content_hash, dump_text
@@ -33,12 +34,14 @@ from .errors import ApiError, error_body
 from .repository import DiscussionRepository, StorageBusy, VersionConflict
 from .schemas import (
     ActionRequest,
+    ActivityPage,
     ConfirmEnvelope,
     ConfirmRequest,
     CreateDiscussionRequest,
     DiscussionList,
     DraftDetail,
     DecisionEnvelope,
+    IssueDetail,
     MessagePage,
     PostMessageRequest,
     SessionView,
@@ -251,6 +254,46 @@ def create_router(
         service: DiscussionService = service_dep,
     ) -> Any:
         return service.messages(_uuid(session_id, "session_id"), after_seq, limit)
+
+    @router.get("/discussions/{session_id}/activity", response_model=ActivityPage)
+    def list_activity(
+        session_id: str,
+        before: int | None = Query(default=None, gt=0),
+        limit: int = Query(default=30, ge=1, le=100),
+        service: DiscussionService = service_dep,
+    ) -> Any:
+        return service.activity(_uuid(session_id, "session_id"), before, limit)
+
+    @router.get("/discussions/{session_id}/issues/{issue_id}", response_model=IssueDetail)
+    def get_issue(session_id: str, issue_id: str, service: DiscussionService = service_dep) -> Any:
+        return service.issue(_uuid(session_id, "session_id"), issue_id)
+
+    @router.get("/discussions/{session_id}/events", response_class=StreamingResponse)
+    async def discussion_events(session_id: str, request: Request, service: DiscussionService = service_dep) -> Any:
+        sid = _uuid(session_id, "session_id")
+        initial_marker = await run_in_threadpool(service.activity_marker, sid)
+
+        async def events():
+            marker = initial_marker
+            yield "event: change\ndata: {}\n\n"
+            for tick in range(1, 31):
+                await asyncio.sleep(1)
+                if await request.is_disconnected():
+                    return
+                try:
+                    next_marker = await run_in_threadpool(service.activity_marker, sid)
+                except ApiError:
+                    yield "event: change\ndata: {}\n\n"
+                    return
+                if next_marker != marker:
+                    marker = next_marker
+                    yield "event: change\ndata: {}\n\n"
+                elif tick % 10 == 0:
+                    yield ": heartbeat\n\n"
+
+        return StreamingResponse(events(), media_type="text/event-stream", headers={
+            "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+        })
 
     @router.post(
         "/discussions/{session_id}/messages",

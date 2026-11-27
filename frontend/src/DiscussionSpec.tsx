@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { api, discussionPath } from './discussions';
 import type { Draft, Handoff, Requirement, Session } from './discussions';
+import { ReviewFindings } from './ReviewFindings';
 
-const verdictLabels: Record<string, string> = { pass: '通过', revise: '退回修订', needs_input: '需要补充' };
+const verdictLabels: Record<string, string> = { pass: '通过', revise: '建议修订', needs_input: '需要补充' };
 
 function requirements(draft?: Draft | null): Requirement[] {
   return Array.isArray(draft?.content.requirements) ? draft.content.requirements : [];
@@ -14,10 +15,10 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
   onCollapse: () => void;
   handoff: Handoff | null;
   locate: (seq: number) => void;
-  itemRef: { value: string } | null;
+  itemRef: { value: string | null } | null;
   busy: boolean;
   confirm?: () => void;
-  requestChanges?: (reason: string) => void;
+  requestChanges?: () => void;
 }) {
   const [selection, select] = useState<string | null>(null);
   const [history, setHistory] = useState<Record<string, Draft>>({});
@@ -26,8 +27,6 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
   const [comparison, setComparison] = useState(false);
   const [highlighted, setHighlighted] = useState<string | null>(null);
   const [view, setView] = useState<'draft' | 'reviews'>('draft');
-  const [editingReason, setEditingReason] = useState(false);
-  const [reason, setReason] = useState('');
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState('');
   const drafts = session?.drafts ?? [];
@@ -41,6 +40,7 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
   const oldItems = requirements(priorDraft);
   const items = requirements(draft);
   const reviews = session?.reviews.filter((review) => review.draft_id === selected?.draft_id) ?? [];
+  const latestReview = reviews.at(-1);
   const current = !!selected && selected.draft_id === active?.draft_id;
   const receipt = handoff?.draft_id === selected?.draft_id ? handoff : null;
   const signed = !!drafts.find((item) => item.draft_id === selected?.draft_id)?.signed
@@ -48,7 +48,7 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
   const exportUrl = signed && session?.export_url
     ? `/api/v1${discussionPath(session.id)}/export?draft_id=${encodeURIComponent(selected!.draft_id)}`
     : receipt?.export_url;
-  const verdict = reviews.at(-1)?.verdict ?? draft?.review_verdict;
+  const verdict = latestReview?.verdict ?? draft?.review_verdict;
   const deliveryLabels = {
     pending_review: '导入预检通过，待评审',
     blocked_review: '导入预检通过，评审阻断仍待处理',
@@ -76,21 +76,12 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
   }, [sessionId, draftToLoad, historyRetry]);
 
   useEffect(() => {
-    setEditingReason(false);
-    setReason('');
     setExportError('');
-  }, [selected?.draft_id, requestChanges !== undefined]);
-
-  useEffect(() => {
-    if (!highlighted || view !== 'draft') return;
-    const target = document.getElementById(`live-requirement-${highlighted}`);
-    target?.focus({ preventScroll: true });
-    target?.scrollIntoView({ block: 'nearest' });
-  }, [highlighted, view, selected?.draft_id]);
+  }, [selected?.draft_id]);
 
   useEffect(() => {
     if (!itemRef) return;
-    const path = /^\/requirements\/(\d+)(?:\/|$)/.exec(itemRef.value);
+    const path = itemRef.value && /^\/requirements\/(\d+)(?:\/|$)/.exec(itemRef.value);
     const id = path ? requirements(active)[Number(path[1])]?.id : itemRef.value;
     const targetId = id && requirements(active).some((item) => item.id === id) ? id : null;
     select(null);
@@ -106,6 +97,16 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
   // A new reference requests navigation. Polls should not return focus to an old target.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemRef]);
+
+  function showRequirement(requirementId: string) {
+    setHighlighted(requirementId);
+    setView('draft');
+    requestAnimationFrame(() => {
+      const target = document.getElementById(`live-requirement-${requirementId}`);
+      target?.focus({ preventScroll: true });
+      target?.scrollIntoView({ block: 'nearest' });
+    });
+  }
 
   async function exportDraft() {
     if (!session || !selected) return;
@@ -160,6 +161,11 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
         {receipt?.content_hash && <p>正文哈希 <code>{receipt.content_hash}</code></p>}
         {exportUrl && <a href={exportUrl}>下载签收规格 JSON</a>}
       </div>}
+      {view === 'reviews' && reviews.length === 0 && <p className="draft-context">此版本还没有评审记录。</p>}
+      {view === 'reviews' && reviews.map((review) => <section key={review.review_id} className="requirement">
+        <header><strong>{review.findings.length ? '评审 Agent 的建议' : '独立评审'}</strong><span>{verdictLabels[review.verdict] ?? review.verdict}</span></header>
+        {!!review.findings.length && <ReviewFindings findings={review.findings} requirements={items} openRequirement={showRequirement} />}
+      </section>)}
       {view === 'draft' && <>
       {draft?.content.product_name && <h3 className="spec-product">{draft.content.product_name}</h3>}
       {draftToLoad && (historyError === draftToLoad
@@ -246,30 +252,13 @@ export function DiscussionSpec({ session, collapsed, onCollapse, handoff, locate
       </div>}
       {draft && <details className="draft-context"><summary>草稿正文 JSON</summary><pre>{JSON.stringify(draft.content, null, 2)}</pre></details>}
       </>}
-      {view === 'reviews' && (reviews.length === 0 ? <p className="draft-context">此版本还没有评审记录。</p> : reviews.map((review) => <section key={review.review_id} className="requirement">
-        <header><strong>独立评审</strong><span>{verdictLabels[review.verdict] ?? review.verdict}</span></header>
-        {review.findings.map((finding, index) => <div className="review-finding" key={finding.finding_id ?? index}>
-          {finding.target_item && (items.some((item) => item.id === finding.target_item)
-            ? <button onClick={() => { setHighlighted(finding.target_item!); setView('draft'); }}>{finding.target_item}</button>
-            : <strong>{finding.target_item}</strong>)}
-          <p>{finding.summary ?? finding.message}</p>
-          {finding.close_condition && <p>完成条件 · {finding.close_condition}</p>}
-        </div>)}
-      </section>))}
     </div>
     {current && (confirm || requestChanges) && <footer className="spec-actions">
-      {canUseReviewReasons && <p>{signed
-        ? '可按本版评审意见继续修订，已签收版本会保留。'
-        : '可直接签收并保留评审意见，也可退回后按评审意见修订。'}</p>}
-      {editingReason && requestChanges && <form className="live-form" onSubmit={(event) => { event.preventDefault(); if (canUseReviewReasons || reason.trim()) requestChanges(reason.trim()); }}>
-        <label>{canUseReviewReasons ? '补充修订意见（可选）' : '修订原因'}<textarea autoFocus required={!canUseReviewReasons} rows={2} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
-        <button disabled={busy || (!canUseReviewReasons && !reason.trim())}>确认退回 v{selected.version}</button>
-      </form>}
       <div className="action-row">
         {confirm && <button className="primary" disabled={busy} onClick={confirm}>
           {canUseReviewReasons ? '直接签收' : '签收'} v{selected.version}
         </button>}
-        {requestChanges && <button onClick={() => setEditingReason(!editingReason)} aria-expanded={editingReason}>{editingReason ? '收起修订说明' : '退回修订'}</button>}
+        {requestChanges && <button type="button" disabled={busy} onClick={requestChanges}>在讨论中填写修订意见</button>}
       </div>
     </footer>}
     </>}

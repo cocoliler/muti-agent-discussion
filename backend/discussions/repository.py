@@ -252,6 +252,33 @@ class DiscussionRepository:
             raise NotFound(session_id)
         return self._meta_from_row(row)
 
+    def activity_marker(self, session_id: str) -> tuple[Any, ...]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT state_version, last_seq,"
+                " (SELECT MAX(id) FROM role_attempts WHERE session_id = s.id),"
+                " (SELECT MAX(started_at) FROM role_attempts WHERE session_id = s.id),"
+                " (SELECT MAX(finished_at) FROM role_attempts WHERE session_id = s.id),"
+                " (SELECT COUNT(finished_at) FROM role_attempts WHERE session_id = s.id)"
+                " FROM discussion_sessions s WHERE id = ? AND deleted_at IS NULL",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            raise NotFound(session_id)
+        return tuple(row)
+
+    def list_public_attempts(self, session_id: str, before: int | None, limit: int) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            where_before = " AND id < ?" if before is not None else ""
+            params = (session_id, before, limit) if before is not None else (session_id, limit)
+            rows = conn.execute(
+                "SELECT id, logical_task_id, attempt_no, role, task_kind, input_version, status,"
+                " started_at, finished_at, elapsed_seconds, json_extract(error, '$.code') AS error_code"
+                " FROM role_attempts WHERE session_id = ?" + where_before + " ORDER BY id DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     @staticmethod
     def _meta_from_row(row: sqlite3.Row) -> dict[str, Any]:
         return {
