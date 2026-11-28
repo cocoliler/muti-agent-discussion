@@ -93,10 +93,12 @@ class DeepSeekProvider:
 
     async def complete(self, request: object, messages: Sequence[Mapping[str, str]]) -> Completion:
         """提交角色提示词并增量读取响应；请求上下文只供上层构建提示词使用。"""
+        initial_task = getattr(request, "initial_task", None)
         payload = {
             "model": self.model,
             "messages": list(messages),
-            "max_tokens": self.max_tokens,
+            "max_tokens": min(self.max_tokens, initial_task.policy.output_token_budget)
+            if initial_task else self.max_tokens,
             "response_format": {"type": "json_object"},
             "thinking": {"type": "disabled"},
             "stream": False,

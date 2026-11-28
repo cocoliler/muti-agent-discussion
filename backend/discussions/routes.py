@@ -279,7 +279,7 @@ def create_router(
     ) -> Any:
         return service.activity(_uuid(session_id, "session_id"), before, limit)
 
-    @router.get("/discussions/{session_id}/issues/{issue_id}", response_model=IssueDetail)
+    @router.get("/discussions/{session_id}/issues/{issue_id}", response_model=IssueDetail, response_model_exclude_unset=True)
     def get_issue(session_id: str, issue_id: str, service: DiscussionService = service_dep) -> Any:
         return service.issue(_uuid(session_id, "session_id"), issue_id)
 

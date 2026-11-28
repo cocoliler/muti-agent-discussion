@@ -197,20 +197,34 @@ class DiscussionEngine:
             problem = citation_problem(session, agenda.outline_source_seqs, None)
             if problem:
                 return self._reject(session, problem[0], problem[1])
+        working = agenda.working_draft
+        if working:
+            if (session.waiting_for != WaitingFor.HOST_AGENDA or working.current or working.version != 0
+                    or working.working_schema_version != 2 or working.input_version != session.input_version
+                    or working.content.get("session_id") != session.session_id
+                    or working.content.get("snapshot_ref") != session.snapshot_ref
+                    or not (working.quality_gate_result or {}).get("can_publish")
+                    or agenda.missing_facts or agenda.initial_pause_reason or agenda.initial_outline):
+                return self._reject(session, ReasonCode.INVALID_AGENDA, "初始草稿与当前任务快照或发布门禁不匹配")
+            problem = citation_problem(session, working.source_seqs, None)
+            if problem:
+                return self._reject(session, problem[0], problem[1])
 
-        session.agenda = agenda
+        # The artifact has a single copy in the session snapshot.
+        session.agenda = replace(agenda, working_draft=None) if working else agenda
         lead = agenda.items[0]
         agenda_message = self._append(
             session, Role.HOST, MessageKind.AGENDA, agenda.summary, topic_id=lead.topic_id,
             plain_summary=agenda.plain_summary,
         )
-        if agenda.missing_facts:
+        if agenda.missing_facts or agenda.initial_pause_reason:
             questions = "；".join(agenda.missing_facts)
+            session.initial_question_ids = tuple(dict.fromkeys((*session.initial_question_ids, *agenda.asked_initial_ids)))
             self._append(
                 session,
                 Role.HOST,
                 MessageKind.CLARIFICATION,
-                f"需要用户补充关键事实：{questions}",
+                f"需要用户补充关键事实：{questions}" if questions else agenda.initial_pause_reason,
                 topic_id=lead.topic_id,
                 clarification_questions=agenda.missing_facts,
             )
@@ -221,7 +235,10 @@ class DiscussionEngine:
                 detail={"missing_facts": list(agenda.missing_facts)},
             )
 
-        if agenda.initial_outline is not None:
+        if working:
+            session.initial_draft = replace(working, publication_seq=agenda_message.seq)
+            session.initial_question_ids = ()
+        elif agenda.initial_outline is not None:
             session.initial_draft = DraftRevision(
                 draft_id=f"{session.session_id}-outline-v{session.input_version}",
                 version=0,
@@ -530,6 +547,7 @@ class DiscussionEngine:
             round_kind=session.round_kind, round_no=session.round_no, topic_id=item.topic_id,
             snapshot_ref=session.snapshot_ref, input_version=session.input_version,
             message_seqs=tuple(sorted(sources)), focus_seq=message.seq,
+            working_draft_id=self._working_draft_id(session),
         )
         session.tasks[task.task_id] = task
         session.dispatch_units += 1
@@ -575,6 +593,7 @@ class DiscussionEngine:
             output.input_version != session.input_version
             or output.snapshot_ref != session.snapshot_ref
             or task.input_version != session.input_version
+            or (task.working_draft_id is not None and task.working_draft_id != self._working_draft_id(session))
         ):
             return self._reject(
                 session,
@@ -663,7 +682,7 @@ class DiscussionEngine:
         if not repeated:
             return replace(output, raised_issues=tuple(accepted))
         if not accepted and output.kind == TaskKind.STATEMENT:
-            return replace(output, raised_issues=(), disposition="no_new_input")
+            return replace(output, raised_issues=(), disposition="suggestion" if output.draft_suggestions else "no_new_input")
         return replace(output, raised_issues=tuple(accepted), text=f"{output.text}\n\n{repeated} 条异议已有记录且没有新证据，未重新派发。")
 
     def submit_review(self, session: DiscussionSession, review: ReviewResult) -> Decision:
@@ -1020,6 +1039,11 @@ class DiscussionEngine:
         session.waiting_for = WaitingFor.ROLE_RESULTS
         return self._result(session, ReasonCode.OK, tasks=dispatch.tasks)
 
+    @staticmethod
+    def _working_draft_id(session: DiscussionSession) -> str | None:
+        draft = session.initial_draft
+        return draft.draft_id if draft and draft.working_schema_version == 2 and draft.input_version == session.input_version else None
+
     def _dispatch_phase(self, session: DiscussionSession, phase: Phase) -> _Dispatch:
         item = session.current_item()
         if item is None:
@@ -1059,6 +1083,7 @@ class DiscussionEngine:
                     input_version=session.input_version,
                     message_seqs=seqs,
                     issue_ids=issue_ids,
+                    working_draft_id=self._working_draft_id(session),
                 )
             )
         for task in tasks:
@@ -1376,6 +1401,7 @@ class DiscussionEngine:
             input_version=session.input_version,
             message_seqs=self._context_seqs(session),
             issue_ids=tuple(issue.issue_id for issue in issues),
+            working_draft_id=self._working_draft_id(session),
         )
         session.tasks[task.task_id] = task
         session.dispatch_units += 1
@@ -1417,6 +1443,7 @@ class DiscussionEngine:
                 topic_id=stored.topic_id, snapshot_ref=session.snapshot_ref,
                 input_version=session.input_version, message_seqs=message_seqs,
                 issue_ids=task.issue_ids,
+                working_draft_id=task.working_draft_id,
             )
             for role in (item.required_roles if item else ())
         )
@@ -1469,6 +1496,11 @@ class DiscussionEngine:
             issue.status = IssueStatus.CLOSED
             issue.closed_by_seq = decision.seq
             issue.assignee = Role.HOST
+        working_id = self._working_draft_id(session)
+        if (working_id and not session.open_issues(session.topic_id)
+                and any(suggestion["draft_id"] == working_id for message in session.messages
+                        if message.topic_id == session.topic_id for suggestion in message.draft_suggestions)):
+            return self._enter_phase(session, Phase.INTEGRATION)
         session.waiting_for = WaitingFor.HOST_DECISION
         return self._result(
             session,
@@ -1506,6 +1538,7 @@ class DiscussionEngine:
             content=dict(output.draft_content or {}),
             source_seqs=output.source_seqs,
             parent_id=current.draft_id if current else None,
+            based_on_working_draft_id=self._working_draft_id(session),
             open_issue_ids=tuple(issue.issue_id for issue in session.open_issues()),
             agreements=tuple(output.agreements),
             alternatives=tuple(output.alternatives),
@@ -1727,6 +1760,7 @@ class DiscussionEngine:
             plain_summary=plain_summary,
             **({key: getattr(output, key) for key in (
                 "basis", "verification", "agreements", "alternatives", "disagreements", "assumptions", "risks",
+                "draft_suggestions",
             )} if output is not None else {}),
         )
         session.messages.append(message)

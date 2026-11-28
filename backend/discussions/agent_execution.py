@@ -1,9 +1,10 @@
 """Drive discussion roles until the engine needs a user decision."""
 
 import asyncio
+import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -21,6 +22,12 @@ from discussion_orchestration.enums import NAMABLE_ROLES
 from spec_handoff.draft import DraftSpec
 
 from backend.roles.contracts import CandidateOption, DraftSnapshot, PriorIssue, RoleRequest, SourceMessage, build_draft_content
+from backend.initial_drafts.contracts import HardConstraint, WorkingDraft
+from backend.initial_drafts.collaboration import agenda_refs, bind_suggestion, build_review, conflicting_targets, pending_suggestions
+from backend.initial_drafts.generation import InitialDraftOutput, InitialDraftTask, explicit_user_constraints, prepare_working_draft
+from backend.initial_drafts.policy import DEFAULT_DRAFT_POLICY
+from backend.initial_drafts.template import DEFAULT_SOFTWARE_TEMPLATE
+from backend.initial_drafts.validation import EvidenceContext
 from backend.roles.provider import DeepSeekProvider
 from backend.roles.runner import RoleRunner
 from backend.roles.simulation import SimulationProvider
@@ -57,6 +64,17 @@ class AgentExecution:
         self.mode = os.environ.get("DISCUSSION_AGENT_MODE", "simulation").strip().lower()
         if self.mode not in ("simulation", "real", "off"):
             raise ValueError("DISCUSSION_AGENT_MODE must be simulation, real, or off")
+        self.initial_mode = os.environ.get("DISCUSSION_INITIAL_DRAFT_MODE", "draft_first").strip().lower()
+        if self.initial_mode not in ("draft_first", "discussion_first", "legacy_outline"):
+            raise ValueError("unknown DISCUSSION_INITIAL_DRAFT_MODE")
+        constraints = json.loads(os.environ.get("DISCUSSION_INITIAL_CONSTRAINTS", "[]"))
+        if not isinstance(constraints, list):
+            raise ValueError("DISCUSSION_INITIAL_CONSTRAINTS must be a JSON array")
+        self.initial_constraints = tuple(HardConstraint.model_validate(item) for item in constraints)
+        if (any(item.origin != "enterprise" or item.source_seqs or item.id.startswith("USER-")
+                for item in self.initial_constraints)
+                or len({item.id for item in self.initial_constraints}) != len(self.initial_constraints)):
+            raise ValueError("configured initial constraints require unique enterprise rules without message references")
         self.routing_mode = os.environ.get("DISCUSSION_ROUTING_MODE", "shadow").strip().lower()
         if self.routing_mode not in ("shadow", "active"):
             raise ValueError("DISCUSSION_ROUTING_MODE must be shadow or active")
@@ -251,8 +269,27 @@ class AgentExecution:
         idea = "\n".join(m.text for m in user_messages)
         if session.status == SessionStatus.CLARIFYING and session.waiting_for == WaitingFor.HOST_AGENDA:
             latest = session.drafts[-1] if session.drafts else None
+            if self.initial_mode == "draft_first":
+                seqs = tuple(message.seq for message in user_messages)
+                previous = getattr(session.agenda, "initial_questions", ())
+                previous_questions = [
+                    {**question, "source_seqs": [seq for seq in question.get("source_seqs", ()) if seq in seqs]}
+                    for question in previous
+                ]
+                task = InitialDraftTask(
+                    snapshot_ref=session.snapshot_ref, template=DEFAULT_SOFTWARE_TEMPLATE, policy=DEFAULT_DRAFT_POLICY,
+                    evidence=EvidenceContext(session_id=session.session_id, input_version=session.input_version,
+                                             visible_source_seqs=seqs, confirmed_source_seqs=seqs,
+                                             required_constraints=(*self.initial_constraints, *explicit_user_constraints(user_messages))),
+                    asked_ids=session.initial_question_ids,
+                    previous_questions=previous_questions,
+                    clarification_seq=next((message.seq for message in reversed(session.messages)
+                                            if previous and message.kind == MessageKind.CLARIFICATION), 0),
+                )
+                return [self._job(session, user_messages, idea, "host", "initial_outline", session.topic_id or "T1",
+                                  initial_task=task, draft_excerpt=self._draft_excerpt(latest))]
             return [self._job(session, user_messages, idea, "host", "agenda", session.topic_id or "T1",
-                              draft_excerpt=self._draft_excerpt(latest))]
+                              draft_excerpt=self._draft_excerpt(latest), agenda_only=self.initial_mode == "discussion_first")]
         item = session.current_item()
         topic = f"{item.title}｜{item.question}" if item else None
         draft = session.current_draft
@@ -357,6 +394,7 @@ class AgentExecution:
         if closing:
             refs.append(closing.seq)
         return PriorIssue(issue_id=issue.issue_id, severity="blocking" if issue.severity.value == "blocking" else "advisory",
+                          draft_refs=list(issue.draft_refs),
                           kind=getattr(getattr(issue, "kind", None), "value", "fact"),
                           target_item="background", description=(
                               f"仍待验证：{issue.summary}" if issue.status == IssueStatus.DEFERRED else issue.summary
@@ -407,9 +445,9 @@ class AgentExecution:
 
     @staticmethod
     def _job(session, messages, idea, role, kind, topic_id, *, task=None, topic=None, allowed_roles=None, draft=None,
-             issues=(), candidates=(), previous_ids=(), focus=None, draft_excerpt=()) -> Job:
+             issues=(), candidates=(), previous_ids=(), focus=None, draft_excerpt=(), initial_task=None, agenda_only=False) -> Job:
         task_id = (task.task_id if task else f"{draft.draft_id}:agent:review" if kind == "review"
-                   else f"{session.session_id}:agent:agenda:v{session.input_version}")
+                   else f"{session.session_id}:agent:{kind}:v{session.input_version}")
         snapshot = None
         if draft:
             spec = DraftSpec.parse(draft.content)
@@ -418,18 +456,33 @@ class AgentExecution:
                                      source_map={req.requirement_id: list(req.source_seqs) for req in spec.requirements},
                                      analysis=AgentExecution._message_analysis(draft))
         initial = getattr(session, "initial_draft", None)
-        if kind in {"agenda", "review"} or (initial and initial.input_version != session.input_version):
+        if kind in {"agenda", "initial_outline", "review"} or (initial and initial.input_version != session.input_version):
             initial = None
-        if kind != "agenda":
+        working = WorkingDraft.model_validate(initial.content) if initial and initial.working_schema_version == 2 else None
+        review = None
+        pending = ()
+        if working and task and task.working_draft_id == working.draft_id:
+            item = session.agenda.item(topic_id)
+            refs = tuple(dict.fromkeys((*item.draft_refs, *(ref for issue in issues for ref in issue.draft_refs))))
+            if kind in {"integration", "challenge"}:
+                pending = pending_suggestions(working, messages, topic_id)
+            review = build_review(working, ROLE_ALIASES.get(role, role), refs, pending, for_candidate=kind == "draft")
+        if kind not in {"agenda", "initial_outline"}:
             cited = {seq for issue in issues for seq in issue.source_seqs}
             if task and task.focus_seq is not None:
                 cited.add(task.focus_seq)
                 cited.update(m.reply_to_seq for m in messages if m.seq == task.focus_seq and m.reply_to_seq is not None)
             if snapshot:
                 cited.update(seq for seqs in snapshot.source_map.values() for seq in seqs)
-            if initial:
+            if review:
+                cited.update(seq for entry in (*review.goals, *review.entries, *review.constraints, *review.assumptions)
+                             for seq in entry.content.get("source_seqs", ()))
+                cited.update(seq for suggestion, message_seq in pending for seq in (*suggestion.source_seqs, message_seq))
+                if kind == "draft":
+                    cited.update(working.source_seqs)
+            elif initial:
                 cited.update(initial.source_seqs)
-            messages = AgentExecution._select_context(session, messages, kind, topic_id, task, cited)
+            messages = AgentExecution._select_context(session, messages, kind, topic_id, task, cited, scoped=bool(review))
         visible = {m.seq for m in messages}
         request = RoleRequest(
             role=ROLE_ALIASES.get(role, role), kind=kind,
@@ -446,7 +499,9 @@ class AgentExecution:
                               analysis=AgentExecution._message_analysis(m))
                 for m in messages
             ], draft=snapshot,
-            initial_outline=encode(initial.content) if initial else None,
+            initial_outline=encode(initial.content) if initial and not working else None,
+            working_review=review,
+            initial_task=initial_task, agenda_only=agenda_only,
             focus=focus, draft_excerpt=list(draft_excerpt),
             issues=[issue.model_copy(update={"source_seqs": [seq for seq in issue.source_seqs if seq in visible]}) for issue in issues],
             **({"allowed_roles": [ROLE_ALIASES.get(r.value, r.value) for r in allowed_roles]}
@@ -455,7 +510,7 @@ class AgentExecution:
         return Job(request, role, kind, session.snapshot_ref, task)
 
     @staticmethod
-    def _select_context(session, messages, kind, topic_id, task, cited):
+    def _select_context(session, messages, kind, topic_id, task, cited, *, scoped=False):
         current = [m for m in messages if m.input_version == session.input_version
                    and m.kind != MessageKind.SYSTEM]
         topic_history = [m for m in reversed(current) if m.topic_id == topic_id]
@@ -473,6 +528,8 @@ class AgentExecution:
             dispatched = set(task.message_seqs)
             recent = [m for m in current if m.seq in dispatched]
             checkpoints.append(next((m for m in topic_history if m.role == task.role and m.round_no < task.round_no), None))
+            if scoped:
+                recent = [m for m in recent if m.topic_id == topic_id][-8:]
 
         remaining = OPTIONAL_CONTEXT_CHARS
         for message in (*checkpoints, *reversed(recent[-RECENT_CONTEXT_LIMIT:])):
@@ -520,6 +577,38 @@ class AgentExecution:
                        "question_options": output.get("question_options", {}),
                        "findings": findings["open"], "verified_findings": findings["closed"]}
             action = "submit_review"
+        elif job.kind == "initial_outline":
+            result = InitialDraftOutput.model_validate(output)
+            payload = {
+                "summary": result.text, "plain_summary": result.plain_summary,
+                "items": [{"topic_id": request.topic_id, "title": request.user_input.splitlines()[0][:80],
+                           "question": result.discussion_focus or "需要补充哪些关键事实？"}],
+                "initial_input_version": request.input_version,
+                "resolved_initial_questions": [item.model_dump(mode="json") for item in result.resolved_questions],
+            }
+            if result.action == "CREATE_OUTLINE":
+                working, report = prepare_working_draft(request, result)
+                if not report.can_publish:
+                    raise ApiError("VALIDATION_FAILED", "初始草稿未通过结构校验", status=422)
+                payload["items"][0]["required_roles"] = [ENGINE_ROLES.get(role, role) for role in result.target_roles]
+                payload["items"][0]["draft_refs"] = list(agenda_refs(working.content, result.discussion_targets))
+                payload["working_draft"] = encode(replace(working.as_working_revision(),
+                                                          quality_gate_result=report.model_dump(mode="json")))
+            else:
+                plan = request.initial_task.policy.clarification_policy().plan(result.questions,
+                                                                              asked_ids=request.initial_task.asked_ids)
+                pause_reason = plan.pause_reason
+                if not plan.ask_now:
+                    reasons = "、".join(dict.fromkeys(item.reason for item in result.questions))
+                    pause_reason = f"{pause_reason} {reasons}。请在讨论输入框补充相应业务信息。"
+                payload.update(
+                    missing_facts=[item.question for item in plan.ask_now],
+                    question_options={item.question: list(item.suggested_options) for item in plan.ask_now},
+                    initial_questions=[item.model_dump(mode="json") for item in result.questions],
+                    asked_initial_ids=[item.question_id for item in plan.ask_now],
+                    initial_pause_reason=pause_reason,
+                )
+            action = "submit_agenda"
         elif task is None:
             payload = {"summary": output["text"], "plain_summary": output.get("plain_summary"), "items": [{"topic_id": request.topic_id,
                        "title": request.user_input.splitlines()[0][:80],
@@ -531,7 +620,7 @@ class AgentExecution:
                 ]
             if output.get("initial_outline") is not None:
                 payload.update(initial_outline=output["initial_outline"], outline_source_seqs=output["source_seqs"])
-            elif output["action"] == "DISCUSS":
+            elif output["action"] == "DISCUSS" and not request.agenda_only:
                 notice = "本次未生成初始设计框架，已按当前议题继续讨论。"
                 payload["summary"] += f"\n\n{notice}"
                 if payload["plain_summary"]:
@@ -548,23 +637,35 @@ class AgentExecution:
             if task.kind in (TaskKind.STATEMENT, TaskKind.CHALLENGE):
                 prefix = f"I-{task.round_no}-{task.task_id.rsplit(':', 1)[-1]}"
                 payload["no_new_issues"] = output.get("no_new_issues", False)
-                objections = output.get("objections") or []
+                objections = list(output.get("objections") or [])
                 if task.kind == TaskKind.STATEMENT:
                     payload["disposition"] = output.get("disposition", "suggestion")
+                    if request.working_review and task.working_draft_id:
+                        suggestions = [bind_suggestion(item, task.task_id, job.role, request.working_review, index)
+                                       for index, item in enumerate(output.get("draft_suggestions", ()), 1)]
+                        payload["draft_suggestions"] = [item.model_dump(mode="json") for item in suggestions]
+                        payload["item_refs"] = list(dict.fromkeys(item.target_id for item in suggestions))
+                        payload["source_seqs"] = list(dict.fromkeys([
+                            *payload["source_seqs"], *(seq for item in suggestions for seq in item.source_seqs),
+                        ]))
                 elif not objections and not payload["no_new_issues"]:
                     objections = [{
                         "description": output["text"], "owner_role": output["target_roles"][0],
                         "source_seqs": output["source_seqs"], "verification": output["verification"],
                         "divergence": output.get("divergence", "fact"), "user_question": output.get("user_question"),
                     }]
+                if task.kind == TaskKind.CHALLENGE and request.working_review:
+                    objections.extend(AgentExecution._draft_conflicts(request, objections))
+                    if objections:
+                        payload["no_new_issues"] = False
                 payload["raised_issues"] = [
-                    {"issue_id": f"{prefix}-{index}" if output.get("objections") else prefix,
+                    {"issue_id": f"{prefix}-{index}" if len(objections) > 1 or output.get("objections") else prefix,
                      "topic_id": task.topic_id, "raised_by": job.role, "severity": item.get("severity", "major"),
                      "kind": item["divergence"], "user_question": item["user_question"],
                      "summary": item["description"], "source_seqs": item["source_seqs"],
                      "assignee": ENGINE_ROLES.get(item["owner_role"], item["owner_role"]),
                      "closure_condition": item["verification"], "proposed_resolution": item.get("proposed_resolution"),
-                     "reopen_if": item.get("reopen_if")}
+                     "reopen_if": item.get("reopen_if"), "draft_refs": item.get("draft_refs", [])}
                     for index, item in enumerate(objections, 1)
                 ]
                 payload["source_seqs"] = list(dict.fromkeys([
@@ -605,6 +706,8 @@ class AgentExecution:
                 payload["item_refs"] = [
                     str(option.get("option_id", "")) for option in payload["scorecard"]["options"]
                 ]
+            elif task.kind == TaskKind.INTEGRATION:
+                payload["draft_decisions"] = output.get("draft_decisions", [])
             elif task.kind == TaskKind.DRAFT:
                 payload["draft_content"] = build_draft_content(output)
                 payload["item_refs"] = list(output["source_map"])
@@ -615,7 +718,7 @@ class AgentExecution:
             action = "submit_output"
 
         def is_current(session):
-            if session.input_version != request.input_version:
+            if session.input_version != request.input_version or session.snapshot_ref != job.snapshot_ref:
                 return False
             if job.kind == "review":
                 return (session.status == SessionStatus.REVIEWING and session.waiting_for == WaitingFor.REVIEW
@@ -623,10 +726,35 @@ class AgentExecution:
             if task is None:
                 return session.status == SessionStatus.CLARIFYING and session.waiting_for == WaitingFor.HOST_AGENDA
             return (session.tasks.get(task.task_id) == task
+                    and (task.working_draft_id is None or
+                         session.initial_draft is not None and session.initial_draft.draft_id == task.working_draft_id)
                     and (session.status == SessionStatus.DISCUSSING
                          or task.focus_seq is not None and session.status == SessionStatus.AWAITING_CONFIRMATION))
 
         return AgentExecution._commit(service, request.session_id, action, payload, is_current, owner=owner)
+
+    @staticmethod
+    def _draft_conflicts(request, objections):
+        suggestions = request.working_review.suggestions
+        covered = {ref for issue in request.issues if issue.kind != "routine" and not issue.treatment
+                   for ref in issue.draft_refs}
+        covered.update(ref for issue in objections if issue["divergence"] != "routine" for ref in issue.get("draft_refs", ()))
+        result = []
+        for target in sorted(conflicting_targets(suggestions) - covered):
+            competing = [item for item in suggestions if item.target_id == target]
+            refs = sorted({seq for item in competing
+                           for seq in (*item.source_seqs, request.working_review.suggestion_message_seqs[item.suggestion_id])})
+            changes = "；".join(dict.fromkeys(item.proposed_change for item in competing))
+            result.append({
+                "description": f"{target} 存在相互冲突的修改建议：{changes}",
+                "owner_role": next((ROLE_ALIASES.get(item.agent_role, item.agent_role) for item in competing
+                                    if ROLE_ALIASES.get(item.agent_role, item.agent_role) in request.allowed_roles),
+                                   request.allowed_roles[0]),
+                "severity": "major", "divergence": "tradeoff",
+                "verification": "在评分卡中比较各修改方案，并说明其对用户价值、成本与风险的影响。",
+                "source_seqs": refs, "user_question": None, "draft_refs": [target],
+            })
+        return result
 
     @staticmethod
     def _commit(service, session_id, action, payload, is_current, *, owner, allow_rejection=False) -> bool:

@@ -25,6 +25,9 @@ def headers():
 
 
 class InitialOutlineTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"DISCUSSION_INITIAL_DRAFT_MODE": "legacy_outline"}))
+
     def test_one_host_call_publishes_outline_before_parallel_statements(self):
         original = SimulationProvider.complete
         calls = []

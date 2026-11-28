@@ -29,6 +29,9 @@ from backend.roles.simulation import SimulationProvider
 
 
 class DiscussionAgentExecutionTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {"DISCUSSION_INITIAL_DRAFT_MODE": "legacy_outline"}))
+
     def test_role_memory_recovers_checkpoints_and_issue_evidence_at_dispatch_boundary(self):
         session = DiscussionSession("session", "project", input_version=3, round_no=4,
                                     topic_id="T1", status=SessionStatus.DISCUSSING,

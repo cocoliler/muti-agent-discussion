@@ -5,6 +5,7 @@ import os
 import re
 from copy import deepcopy
 
+from backend.initial_drafts.contracts import working_module_id
 from .contracts import RoleRequest
 from .provider import Completion, ProviderError
 
@@ -102,6 +103,53 @@ ADVICE = {
     "designer": "建议请实际使用者演示「{}」，核对最容易中断的一步；据此设计成功、空状态和失败后的操作入口。",
     "market": "建议围绕「{}」比较试用前后的任务完成时间，用试用记录验证价值。",
 }
+
+
+def _initial_working_draft(req):
+    legacy = _host(req.model_copy(update={"kind": "agenda"}))
+    origin = req.messages[-1].seq
+    if req.user_input.strip() in {"想做个工具", "做个工具", "做一个应用", "build an app"}:
+        return {
+            "action": "ASK_USER", "text": "需要先明确目标。", "source_seqs": [origin],
+            "questions": [{"question_id": "core-goal", "question": "首版要解决哪个业务问题？", "category": "blocking",
+                           "reason": "无法从输入判断产品目标。", "source_seqs": [origin]}],
+        }
+    flat = legacy["initial_outline"]
+
+    def item(identifier, text, **fields):
+        return {"id": identifier, "text": text, "status": fields.pop("status", "proposed"), **fields}
+
+    modules = [item(working_module_id(req.session_id, key), title, name=title)
+               for key, title in zip(("entry", "rules", "result"), flat["core_modules"])]
+    for previous, current in zip(modules, modules[1:]):
+        current["depends_on"] = [previous["id"]]
+    constraints = req.initial_task.evidence.required_constraints
+    sources = sorted({origin} | {seq for constraint in constraints for seq in constraint.source_seqs})
+    content = {
+        "product_name": flat["product_name"], "positioning": item("position", flat["positioning"]),
+        "goals": [item("goal", flat["goals"][0])],
+        "actors": [item("actor", flat["target_users"][0], status="assumed")],
+        "scenarios": [item("scenario", flat["scenarios"][0], actor_ids=["actor"],
+                           trigger="用户开始操作", outcome="用户收到处理结果")],
+        "modules": modules,
+        "business_flows": [item("flow", "主流程", steps=[
+            item(f"step-{index}", action, actor_id="actor", module_id=module["id"], outcome=module["name"])
+            for index, (action, module) in enumerate(zip(flat["business_flow"], modules), 1)
+        ])],
+        "scope_in": [item("scope", flat["scope_in"][0])],
+        "boundaries": [item("boundary", flat["system_boundary"][0])],
+        "constraints": [constraint.model_dump(mode="json") for constraint in constraints],
+        "assumptions": [item("assumption", flat["assumptions"][0], status="assumed")],
+        "open_questions": [
+            {"question_id": f"open-{index}", "question": question, "category": "important",
+             "reason": "可能影响后续范围", "source_seqs": [origin]}
+            for index, question in enumerate(flat["open_questions"], 1)
+        ],
+    }
+    return {"action": "CREATE_OUTLINE", "text": legacy["text"], "source_seqs": sources, "content": content,
+            "resolved_questions": [{"question_id": question.question_id, "reason": "用户已补充初始目标。", "source_seqs": [origin]}
+                                   for question in req.initial_task.previous_questions],
+            "target_roles": legacy["target_roles"], "discussion_focus": "核对设计框架与主要业务边界"}
 
 
 def _specialist(req):
@@ -354,5 +402,7 @@ def _review(req):
 
 class SimulationProvider:
     async def complete(self, request: RoleRequest, messages: list[dict]) -> Completion:
+        if request.kind == "initial_outline":
+            return Completion(json.dumps(_initial_working_draft(request), ensure_ascii=False), usage={"total_tokens": 0})
         handler = {"host": _host, "critic": _critic, "scribe": _scribe, "reviewer": _review}.get(request.role, _specialist)
         return Completion(json.dumps(handler(request), ensure_ascii=False), usage={"total_tokens": 0})

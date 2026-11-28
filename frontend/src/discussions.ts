@@ -1,4 +1,5 @@
 export type ClarificationAnswer = { question: string; answer: string; options: string[] };
+export type InitialQuestionDetail = { reason: string; affected_modules: string[] };
 
 export type Message = {
   seq: number;
@@ -39,6 +40,17 @@ export type InitialDraft = {
   revision?: number;
   template_ref?: string | null;
   policy_ref?: string | null;
+  quality_gate_result?: { findings: { rule_id: string; path: string; message: string }[] } | null;
+  discussion_seq?: number | null;
+  working_changes?: {
+    base_revision: number;
+    edits: {
+      suggestion: { suggestion_id: string; proposed_change: string };
+      message_seq: number;
+      decision: 'accept' | 'reject' | 'defer';
+      reason: string;
+    }[];
+  } | null;
   source_seqs: number[];
   content: {
     product_name: string;
@@ -143,7 +155,8 @@ export type Session = {
   status: string;
   input_version: number;
   state_version: number;
-  clarification?: { message_seq: number; questions: string[]; options?: Record<string, string[]> } | null;
+  clarification?: { message_seq: number; questions: string[]; options?: Record<string, string[]>;
+    details?: Record<string, InitialQuestionDetail> } | null;
   clarification_answers?: Record<string, ClarificationAnswer[]>;
   superseded_answer_seqs?: number[];
   round_no: number;

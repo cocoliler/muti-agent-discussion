@@ -49,6 +49,7 @@ class AgendaItem:
     required_roles: tuple[Role, ...] = PROFESSIONAL_ROLES
     role_scope: tuple[Role, ...] = PROFESSIONAL_ROLES
     assumptions: tuple[Assumption, ...] = ()
+    draft_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,10 @@ class Agenda:
     plain_summary: str | None = None
     initial_outline: InitialOutline | None = None
     outline_source_seqs: tuple[int, ...] = ()
+    working_draft: DraftRevision | None = None
+    initial_questions: tuple[Mapping[str, Any], ...] = ()
+    asked_initial_ids: tuple[str, ...] = ()
+    initial_pause_reason: str | None = None
 
     def item(self, topic_id: str) -> AgendaItem:
         for item in self.items:
@@ -125,6 +130,9 @@ class Message:
     assumptions: tuple[str, ...] = ()
     risks: tuple[str, ...] = ()
     plain_summary: str | None = None
+    draft_suggestions: tuple[Mapping[str, Any], ...] = ()
+    rejected_working_revision: Mapping[str, Any] | None = None
+    rejected_working_revision: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +167,7 @@ class Issue:
     closure_condition: str | None = None
     proposed_resolution: str | None = None
     reopen_if: str | None = None
+    draft_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -211,6 +220,7 @@ class SpeakerTask:
     message_seqs: tuple[int, ...] = ()
     issue_ids: tuple[str, ...] = ()
     focus_seq: int | None = None
+    working_draft_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +259,8 @@ class SpeakerOutput:
     plain_summary: str | None = None
     no_new_issues: bool = False
     disposition: str = "suggestion"
+    draft_suggestions: tuple[Mapping[str, Any], ...] = ()
+    draft_decisions: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -304,6 +316,10 @@ class DraftRevision:
     scorecard_id: str | None = None
     chosen_option_id: str | None = None
     working_schema_version: int | None = None
+    quality_gate_result: Mapping[str, Any] | None = None
+    publication_seq: int | None = None
+    working_changes: Mapping[str, Any] | None = None
+    based_on_working_draft_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -371,6 +387,7 @@ class DiscussionSession:
     # Working artifact for this input version. Only frozen candidates belong in drafts.
     initial_draft: DraftRevision | None = None
     previous_outlines: list[DraftRevision] = field(default_factory=list)
+    initial_question_ids: tuple[str, ...] = ()
     reviews: list[ReviewResult] = field(default_factory=list)
     #: 每个议题的收敛评分卡（按输入版本），以及最终采纳的方案。
     scorecards: list[Scorecard] = field(default_factory=list)

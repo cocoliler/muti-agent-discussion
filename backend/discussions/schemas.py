@@ -122,6 +122,7 @@ class DraftSummary(_Strict):
     scorecard_id: str | None = None
     chosen_option_id: str | None = None
     parent_id: str | None = None
+    based_on_working_draft_id: str | None = None
 
 
 class DraftHistoryItem(_Strict):
@@ -177,10 +178,16 @@ class DecisionView(_Strict):
     seq: int | None = None
 
 
+class InitialQuestionDetail(_Strict):
+    reason: str
+    affected_modules: list[str]
+
+
 class ClarificationView(_Strict):
     message_seq: int
     questions: list[str] = Field(default_factory=list)
     options: dict[str, list[str]] = Field(default_factory=dict)
+    details: dict[str, InitialQuestionDetail] = Field(default_factory=dict)
 
 
 class UsageTotals(_Strict):
@@ -222,10 +229,14 @@ class InitialDraftView(_Strict):
     template_ref: str | None = None
     policy_ref: str | None = None
     source_seqs: list[int]
+    working_draft: dict[str, Any] | None = None
+    quality_gate_result: dict[str, Any] | None = None
+    discussion_seq: int | None = None
+    working_changes: dict[str, Any] | None = None
 
 
 class DraftMilestone(_Strict):
-    stage: Literal["input_received", "outline_committed", "outline_visible", "candidate_frozen", "review_delivered"]
+    stage: Literal["input_received", "outline_committed", "outline_revised", "outline_visible", "candidate_frozen", "review_delivered"]
     subject: str
     input_version: int
     round_no: int
@@ -246,11 +257,21 @@ class DraftMetricAttempt(_Strict):
     prompt_tokens: int | None
     completion_tokens: int | None
     total_tokens: int | None
+    error_code: str | None = None
+    diagnostic: str | None = None
+
+
+class InitialClarificationMetric(_Strict):
+    input_version: int
+    asked_count: int
+    pause_reason: str
+    created_at: str
 
 
 class DraftMetricsView(_Strict):
     milestones: list[DraftMilestone]
     attempts: list[DraftMetricAttempt]
+    initial_clarifications: list[InitialClarificationMetric] = Field(default_factory=list)
 
 
 class SessionView(_Strict):
@@ -316,6 +337,7 @@ class IssueDetail(_Strict):
     closure_condition: str | None = None
     response_seq: int | None = None
     closed_by_seq: int | None = None
+    draft_refs: list[str] = Field(default_factory=list)
 
 
 class DecisionEnvelope(_Strict):

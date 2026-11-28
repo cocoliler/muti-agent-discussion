@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Mapping
 
@@ -20,6 +20,9 @@ from discussion_orchestration.models import ClarificationAnswer
 from discussion_orchestration.scoring import rank_options
 from spec_handoff import DraftSpec
 from spec_handoff.validation import build_report, parent_draft
+from backend.initial_drafts.contracts import WorkingDraft
+from backend.initial_drafts.collaboration import revise_working_draft
+from backend.initial_drafts.generation import outline_preview
 
 from .codec import CodecError, decode, encode
 from .errors import ApiError, decision_error_code, decision_status
@@ -149,6 +152,19 @@ class DiscussionService:
     @staticmethod
     def _outline_view(draft: Any) -> dict[str, Any]:
         schema_version = draft.working_schema_version or 0
+        if schema_version == 2:
+            working = WorkingDraft.model_validate(draft.content)
+            return {
+                "draft_id": working.draft_id, "input_version": working.input_version,
+                "revision": working.revision, "schema_version": working.schema_version,
+                "template_ref": f"{working.template_ref.id}@{working.template_ref.version}",
+                "policy_ref": f"{working.policy_ref.id}@{working.policy_ref.version}",
+                "content": outline_preview(working.content), "source_seqs": list(working.source_seqs),
+                "working_draft": working.model_dump(mode="json"),
+                "quality_gate_result": draft.quality_gate_result,
+                "discussion_seq": draft.publication_seq,
+                "working_changes": draft.working_changes,
+            }
         return {
             "draft_id": draft.draft_id,
             "input_version": draft.input_version,
@@ -205,6 +221,7 @@ class DiscussionService:
             "closure_condition": getattr(issue, "closure_condition", None),
             "response_seq": getattr(issue, "response_seq", None),
             "closed_by_seq": getattr(issue, "closed_by_seq", None),
+            **({"draft_refs": issue.draft_refs} if issue.draft_refs else {}),
         }
 
     def messages(self, session_id: str, after_seq: int, limit: int) -> dict[str, Any]:
@@ -350,6 +367,12 @@ class DiscussionService:
         )
         if replayed is not None:
             return replayed
+        if action == "submit_agenda" and lease_owner is None and any(payload.get(key) for key in (
+                "working_draft", "initial_questions", "asked_initial_ids", "initial_pause_reason",
+                "resolved_initial_questions")):
+            raise ApiError("VALIDATION_FAILED", "新版初始草稿和澄清只能由当前 Host 任务提交", status=422)
+        if action == "submit_output" and lease_owner is None and any(payload.get(key) for key in ("draft_suggestions", "draft_decisions")):
+            raise ApiError("VALIDATION_FAILED", "草稿修改建议与处理结论必须来自当前 Agent 任务", status=422)
         decision = self._dispatch(session, action, dict(payload))
         return self._commit(
             session,
@@ -527,7 +550,18 @@ class DiscussionService:
                 if not report.ok:
                     raise ApiError("VALIDATION_FAILED", "候选稿未通过下游导入预检", status=422,
                                    issues=[item.as_dict() for item in report.errors])
-            return engine.submit_output(session, output)
+            result = engine.submit_output(session, output)
+            if (result.ok and output.kind.value == "integration" and task.working_draft_id
+                    and session.messages[-1].task_id == task.task_id):
+                rejected = revise_working_draft(session, output, task, session.last_seq)
+                if rejected:
+                    message = session.messages[-1]
+                    note = "本轮修改未通过草稿结构检查，保留上一版本。"
+                    session.messages[-1] = replace(
+                        message, text=f"{message.text}\n\n{note}", risks=(*message.risks, note),
+                        rejected_working_revision=rejected,
+                    )
+            return result
 
         handler = {
             "request_analysis": request_analysis,
@@ -694,7 +728,10 @@ class DiscussionService:
 
     @staticmethod
     def _message_view(message: Any) -> dict[str, Any]:
-        return encode(message)
+        public = encode(message)
+        public.pop("draft_suggestions", None)
+        public.pop("rejected_working_revision", None)
+        return public
 
     @staticmethod
     def _task_view(task: Any) -> dict[str, Any]:
@@ -710,6 +747,7 @@ class DiscussionService:
             return None
         questions = list(getattr(message, "clarification_questions", ()))
         options = {}
+        details = {}
         if message.role.value == "reviewer":
             review = next((item for item in reversed(session.reviews) if item.input_version == session.input_version), None)
             if review is not None:
@@ -719,17 +757,19 @@ class DiscussionService:
                                    if finding.finding_id == f"{review.review_id}:questions"), "")
                     questions = legacy.split("；")
         elif message.role.value == "host":
-            if not questions:
-                questions = message.text.removeprefix("需要用户补充关键事实：").split("；")
             agenda = getattr(session, "agenda", None)
+            if not questions and not getattr(agenda, "initial_pause_reason", None):
+                questions = message.text.removeprefix("需要用户补充关键事实：").split("；")
             options = getattr(agenda, "question_options", {})
+            details = {item["question"]: {"reason": item["reason"], "affected_modules": item.get("affected_modules", [])}
+                       for item in getattr(agenda, "initial_questions", ()) if item["question"] in questions}
         questions = list(dict.fromkeys(q.strip() for q in questions if q.strip()))
         picks = {}
         for question in questions:
             entries = list(dict.fromkeys(option.strip() for option in options.get(question, ()) if option.strip()))
-            if len(entries) >= 4:
+            if len(entries) >= 4 or (question in details and entries):
                 picks[question] = entries[:4]
-        return {"message_seq": message.seq, "questions": questions, "options": picks}
+        return {"message_seq": message.seq, "questions": questions, "options": picks, "details": details}
 
     @staticmethod
     def _usage(attempts: list[dict[str, Any]]) -> dict[str, Any]:
@@ -828,6 +868,7 @@ class DiscussionService:
             "version": draft.version,
             "input_version": draft.input_version,
             "parent_id": getattr(draft, "parent_id", None),
+            "based_on_working_draft_id": draft.based_on_working_draft_id,
             "open_issue_ids": list(draft.open_issue_ids),
             "review_verdict": verdict,
             "delivery_status": delivery_status,
@@ -882,7 +923,7 @@ class DiscussionService:
         for attempt in attempts:
             if attempt["input_version"] != session.input_version:
                 continue
-            if attempt["logical_task_id"] not in current_ids and attempt["task_kind"] != "agenda":
+            if attempt["logical_task_id"] not in current_ids and attempt["task_kind"] not in {"agenda", "initial_outline"}:
                 continue
             role = attempt["role"]
             previous = latest.get(role)

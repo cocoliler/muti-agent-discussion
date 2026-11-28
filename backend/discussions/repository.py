@@ -357,6 +357,9 @@ class DiscussionRepository:
             if action == "submit_agenda" and "agenda" in new_kinds and outline and outline.working_schema_version:
                 self._record_milestone(conn, session.session_id, "outline_committed", outline.draft_id,
                                        outline.input_version, 0, now)
+            if outline and outline.working_changes and outline.publication_seq and outline.publication_seq > high_water:
+                self._record_milestone(conn, session.session_id, "outline_revised", outline.draft_id,
+                                       outline.input_version, session.round_no, now)
             draft = getattr(session, "current_draft", None)
             if action == "submit_output" and "draft" in new_kinds and draft and session.status.value == "reviewing":
                 self._record_milestone(conn, session.session_id, "candidate_frozen", draft.draft_id,
@@ -448,7 +451,7 @@ class DiscussionRepository:
             committed = conn.execute(
                 "SELECT m.input_version, m.round_no FROM discussion_milestones m"
                 " JOIN discussion_sessions s ON s.id = m.session_id"
-                " WHERE m.session_id = ? AND m.stage = 'outline_committed' AND m.subject = ?"
+                " WHERE m.session_id = ? AND m.stage IN ('outline_committed', 'outline_revised') AND m.subject = ?"
                 " AND s.deleted_at IS NULL AND s.input_version = m.input_version",
                 (session_id, draft_id),
             ).fetchone()
@@ -470,8 +473,13 @@ class DiscussionRepository:
             ).fetchall()
             rows = conn.execute(
                 "SELECT id, logical_task_id, task_kind, attempt_no, input_version, status,"
-                " started_at, finished_at, elapsed_seconds, usage FROM role_attempts"
+                " started_at, finished_at, elapsed_seconds, usage, error FROM role_attempts"
                 " WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+            clarifications = conn.execute(
+                "SELECT payload, created_at FROM discussion_events WHERE session_id = ? AND action = 'submit_agenda'"
+                " AND json_type(payload, '$.initial_questions') = 'array' ORDER BY id",
                 (session_id,),
             ).fetchall()
         attempts = []
@@ -479,9 +487,20 @@ class DiscussionRepository:
             attempt = dict(row)
             raw_usage = attempt.pop("usage")
             usage = json.loads(raw_usage) if raw_usage else {}
-            attempts.append({**attempt, **{key: usage.get(key) for key in
+            raw_error = attempt.pop("error")
+            error = json.loads(raw_error) if raw_error else {}
+            attempts.append({**attempt, "error_code": error.get("code"), "diagnostic": error.get("diagnostic"),
+                             **{key: usage.get(key) for key in
                                            ("prompt_tokens", "completion_tokens", "total_tokens")}})
-        return {"milestones": [dict(row) for row in milestones], "attempts": attempts}
+        clarification_metrics = []
+        for row in clarifications:
+            payload = json.loads(row["payload"])
+            clarification_metrics.append({
+                "input_version": payload["initial_input_version"], "asked_count": len(payload["asked_initial_ids"]),
+                "pause_reason": payload["initial_pause_reason"], "created_at": row["created_at"],
+            })
+        return {"milestones": [dict(row) for row in milestones], "attempts": attempts,
+                "initial_clarifications": clarification_metrics}
 
     @staticmethod
     def _high_water(conn: sqlite3.Connection, session_id: str) -> int:

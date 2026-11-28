@@ -8,6 +8,8 @@ from typing import Annotated, Any, Literal, get_args
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, ValidationInfo, model_validator
 
+from backend.initial_drafts.generation import InitialDraftOutput, InitialDraftTask, prepare_working_draft
+from backend.initial_drafts.collaboration import DraftDecision, DraftSuggestion, WorkingDraftReview, agenda_refs
 from spec_handoff.draft import DraftSpec
 from spec_handoff.validation import build_report
 
@@ -130,6 +132,7 @@ class Issue(Contract):
     closure_condition: Text
     #: fact 靠证据收敛；value 必须由用户裁决；tradeoff 按评分维度权衡。
     kind: Divergence = "fact"
+    draft_refs: list[Text] = Field(default_factory=list)
 
 
 class PriorIssue(Issue):
@@ -179,7 +182,7 @@ class OutlineContent(Contract):
 
 
 _ROLE_TASK_KINDS = {
-    "host": {"agenda", "scoring", "integration", "draft"},
+    "host": {"agenda", "initial_outline", "scoring", "integration", "draft"},
     "critic": {"challenge"},
     "scribe": {"integration", "draft"},
     "reviewer": {"review"},
@@ -208,6 +211,9 @@ class RoleRequest(Contract):
     allowed_roles: list[Specialist] = Field(default_factory=lambda: ["product", "architect", "designer"])
     draft: DraftSnapshot | None = None
     initial_outline: OutlineContent | None = None
+    initial_task: InitialDraftTask | None = None
+    working_review: WorkingDraftReview | None = None
+    agenda_only: bool = False
     focus: Text | None = None
     draft_excerpt: list[Text] = Field(default_factory=list)
 
@@ -215,11 +221,18 @@ class RoleRequest(Contract):
     def validate_scope(self):
         if self.kind and self.kind not in _ROLE_TASK_KINDS[self.role]:
             raise RoleRuleError("task kind is not valid for the assigned role")
-        if self.initial_outline is not None and self.kind in {"agenda", "review"}:
+        if (self.kind == "initial_outline") != (self.initial_task is not None):
+            raise RoleRuleError("initial_outline tasks require a dedicated task snapshot")
+        if self.initial_task and (self.initial_task.evidence.session_id != self.session_id
+                                  or self.initial_task.evidence.input_version != self.input_version):
+            raise RoleRuleError("initial task evidence must match the current input snapshot")
+        if self.initial_outline is not None and self.kind in {"agenda", "initial_outline", "review"}:
             raise RoleRuleError("initial outline is only available to post-agenda discussion tasks")
+        if self.working_review and self.kind in {"agenda", "initial_outline", "review"}:
+            raise RoleRuleError("working review is only available to discussion tasks")
         if self.focus is not None and self.kind != "statement":
             raise RoleRuleError("focus is reserved for a requested specialist statement")
-        if self.draft_excerpt and self.kind != "agenda" and self.focus is None:
+        if self.draft_excerpt and self.kind not in {"agenda", "initial_outline"} and self.focus is None:
             raise RoleRuleError("draft_excerpt is reserved for agenda and focused analysis")
         unique([option.option_id for option in self.candidate_options], "candidate option IDs")
         if self.kind == "stance" and not 2 <= len(self.candidate_options) <= 8:
@@ -357,11 +370,13 @@ class ObjectionInput(Contract):
     proposed_resolution: Text | None = None
     reopen_if: Text | None = None
     severity: Literal["major", "blocking"] = "major"
+    draft_refs: list[Text] = Field(default_factory=list)
 
 
 class StatementOutput(OpinionOutput):
     disposition: Literal["suggestion", "no_new_input", "objection", "needs_clarification"] = "suggestion"
     objections: list[ObjectionInput] = Field(default_factory=list, max_length=4)
+    draft_suggestions: list[DraftSuggestion] = Field(default_factory=list, max_length=4)
 
 
 class CriticOutput(RoleOutput):
@@ -387,6 +402,10 @@ class IntegrationOutput(RoleOutput):
     disagreements: list[Text]
     assumptions: list[Text]
     risks: list[Text]
+
+
+class WorkingIntegrationOutput(IntegrationOutput):
+    draft_decisions: list[DraftDecision] = Field(default_factory=list)
 
 
 class ScribeOutput(IntegrationOutput):
@@ -450,6 +469,8 @@ OPINION_TASK_FIELDS = {"response": "responses", "stance": "stances"}
 
 
 def output_model(request: RoleRequest) -> type[RoleOutput]:
+    if request.kind == "initial_outline":
+        return InitialDraftOutput
     if request.kind == "agenda":
         return HostAgendaOutput
     if request.kind == "scoring":
@@ -457,7 +478,7 @@ def output_model(request: RoleRequest) -> type[RoleOutput]:
     if request.kind == "draft":
         return ScribeOutput
     if request.kind == "integration":
-        return IntegrationOutput
+        return WorkingIntegrationOutput if request.working_review else IntegrationOutput
     return OPINION_TASK_MODELS.get(request.kind, OUTPUT_MODELS[request.role])
 
 ROLE_INSTRUCTIONS = {
@@ -496,7 +517,7 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
         "记录依据、暂定假设和需要重开的条件。若用户已经答复、授权采用合理默认值，或答案可从现有证据推导，就继续推进。"
         "需要用户确认的情形包括会改变产品目标、首版范围、业务规则或硬约束的决定，缺失且只有用户知道的关键事实，以及用户明确保留的选择。",
     ]
-    if request.kind == "agenda":
+    if request.kind == "agenda" and not request.agenda_only:
         instructions.append(
             "从 allowed_roles 中只选能处理当前议题或草稿实际缺口的专业角色，通常一到两位。在发言中说明各自要检查什么。"
             "开题时在同一次回复完成初始设计框架。能辨认项目的主要目标和使用场景时，选择 DISCUSS 并填写 initial_outline。"
@@ -505,6 +526,47 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
             "根据信息写整体骨架，略过技术细节；未经确认的用户、范围和流程标明为暂定，勿写成已批准的规格。"
             "只有无法判断核心目标或不同理解会根本改变项目时才选 ASK_USER，此时 questions 只列必要的问题，省略 initial_outline。"
         )
+    if request.agenda_only:
+        instructions.append("此路径只排议程或澄清，省略 initial_outline。")
+    if request.initial_task:
+        plan = request.initial_task.policy.plan(template=request.initial_task.template)
+        instructions = [
+            "你是主持人。一次完成初始框架与专业讨论安排。只输出符合下方 Schema 的 JSON。",
+            "遇到无法确定项目目标、定位或硬性约束的歧义，选择 ASK_USER，填写 blocking 问题、理由、所涉范围、依据和可选答案。"
+            "沿用尚未解决问题的 ID，不得将一般未知事项当成阻断。由服务端按预算筛选提问。",
+            "previous_questions 中已经解决的阻断问题，需要在 resolved_questions 逐项给出原因和 clarification_seq 之后的用户依据。"
+            "若仍有旧问题没有依据，继续选择 ASK_USER。",
+            "其余情况选 CREATE_OUTLINE，填写 content、source_seqs、discussion_focus 和需要参加的 target_roles。"
+            "discussion_targets 选出与议题相关的草稿条目 ID，优先定位关键模块、流程、边界、风险和待确认事项。"
+            "important/deferred 问题写入 content.open_questions。为模块与角色指定唯一稳定 ID，流程逐步引用实际 ID。",
+            "原样复制 evidence.required_constraints。引用用户原话时写入当前可见消息序号。"
+            "用 status 区分已确认事实、建议、假设和待确认内容。工作草稿与最终规格的身份和状态由服务器设置。",
+            "填写 template.fields 定义的所有必填内容。草稿级 source_seqs 覆盖逐项引用。text 写自然的全局摘要和下一步讨论重点。",
+            *plan.requirements,
+        ]
+    if request.working_review:
+        instructions.append(
+            "working_review 是当前工作草稿的选定条目。围绕当前议题报告新增发现或改动，沿用条目 ID，"
+            "保留已确认事实和硬性约束。不要重写项目方案。重大遗漏、待核实事实和取舍通过 objections 提出，"
+            "在 draft_refs 填写涉及的条目 ID。涉及用户偏好时使用价值分歧。"
+        )
+        if request.kind == "statement" and not request.focus:
+            instructions.append(
+                "仅在有具体改动时填写 draft_suggestions，包含 target_id、operation、proposed_change、rationale、"
+                "severity 和有依据的 source_seqs。update 给出该条目的替换文字，add 给出该条目的补充建议。"
+                "待用户确认或重大风险的建议必须同时给出关联的 objections，无新增意见可以直接标记 no_new_input。"
+            )
+        if request.kind == "integration":
+            instructions.append(
+                "逐条对 working_review.suggestions 给出 draft_decisions，引用 suggestion_id，"
+                "给出 accept、reject 或 defer 及理由。仅采纳符合约束且没有冲突的普通修改。"
+                "未解决的风险、事实和价值分歧保留在现有问题流程中。"
+            )
+        if request.kind == "draft":
+            instructions.append(
+                "基于工作草稿和已有决策形成候选规格。沿用既有正式需求 ID，保留工作草稿中的有效约束、"
+                "假设、风险和未决问题。已采纳的设计补充仍需独立评审；逐项引用 messages 中的依据。"
+            )
     if request.draft_excerpt:
         instructions.append("draft_excerpt 是已存候选稿的相关背景。评估它与最新用户输入的差异，来源引用仍以 messages 为准。")
     if request.focus:
@@ -601,7 +663,7 @@ def build_messages(request: RoleRequest) -> list[dict[str, str]]:
             "勿把未经用户选择的建议写成已确认事实，也勿加入自由填写选项，界面会自动提供。没有问题时用空对象。"
         )
     output_schema = output_model(request).model_json_schema()
-    if request.kind == "agenda":
+    if request.kind == "agenda" and not request.agenda_only:
         output_schema["allOf"] = [{
             "if": {"properties": {"action": {"const": "DISCUSS"}}},
             "then": {"required": ["initial_outline"], "properties": {"initial_outline": {"type": "object"}}},
@@ -629,7 +691,7 @@ def check_host(request, output, *, allow_missing_agenda_outline: bool = False):
     if request.kind == 'agenda' and output.action not in ('DISCUSS', 'ASK_USER'):
         raise RoleRuleError('agenda tasks must start discussion or request clarification')
     if (isinstance(output, HostAgendaOutput) and output.action == "DISCUSS"
-            and output.initial_outline is None and not allow_missing_agenda_outline):
+            and output.initial_outline is None and not (allow_missing_agenda_outline or request.agenda_only)):
         raise RoleRuleError("agenda DISCUSS: add a complete initial_outline object using the supplied user input")
     if output.topic_id != request.topic_id:
         raise RoleRuleError("host topic_id does not match the task")
@@ -805,6 +867,9 @@ def _restore_source_seqs(payload: dict, request: RoleRequest, visible: set[int])
 def check_objections(request: RoleRequest, objections: list[ObjectionInput], visible: set[int]) -> None:
     unique([item.description for item in objections], "objection descriptions")
     for index, item in enumerate(objections):
+        targets = request.working_review.target_ids if request.working_review else set()
+        if set(item.draft_refs) - targets:
+            raise RoleRuleError("objection draft_refs must match the assigned draft excerpt")
         if item.divergence == "tradeoff" and item.severity == "blocking":
             raise RoleRuleError("tradeoff goes through scoring before drafting; use major severity")
         if item.owner_role not in request.allowed_roles:
@@ -830,7 +895,7 @@ def validate_output(request: RoleRequest, raw: str, *, allow_missing_agenda_outl
     visible = {message.seq for message in request.messages}
     model = output_model(request)
     if isinstance(payload, dict):
-        if request.kind == "agenda" and payload.get("action") == "ASK_USER":
+        if request.kind == "agenda" and (payload.get("action") == "ASK_USER" or request.agenda_only):
             payload.pop("initial_outline", None)
         summary = payload.get("plain_summary")
         if not isinstance(summary, str) or not summary.strip():
@@ -863,6 +928,52 @@ def validate_output(request: RoleRequest, raw: str, *, allow_missing_agenda_outl
         _restore_source_seqs(payload, request, visible)
     output = model.model_validate(payload, context=context)
     check_sources(output.source_seqs, visible)
+    if isinstance(output, InitialDraftOutput):
+        task = request.initial_task
+        previous_ids = {question.question_id for question in task.previous_questions}
+        resolved_ids = [item.question_id for item in output.resolved_questions]
+        unique(resolved_ids, "resolved clarification IDs")
+        for item in output.resolved_questions:
+            if (item.question_id not in previous_ids or not item.source_seqs
+                    or any(seq <= task.clarification_seq or seq not in task.evidence.confirmed_source_seqs
+                           for seq in item.source_seqs)
+                    or not set(item.source_seqs) <= set(output.source_seqs)):
+                raise RoleRuleError("initial_outline clarification resolution needs new user evidence for an existing question")
+        unresolved = previous_ids - set(resolved_ids)
+        if output.action == "ASK_USER":
+            if (output.content is not None or output.target_roles or output.discussion_targets or not output.questions
+                    or any(question.category != "blocking" for question in output.questions)):
+                raise RoleRuleError("initial_outline ASK_USER requires only blocking questions and no draft")
+            unique([question.question_id for question in output.questions], "initial clarification IDs")
+            unique([question.question.casefold() for question in output.questions], "initial clarification questions")
+            for question in output.questions:
+                check_sources(question.source_seqs, visible, "initial clarification source_seqs")
+            if set(resolved_ids) & {question.question_id for question in output.questions}:
+                raise RoleRuleError("resolved questions cannot be asked again")
+            old_pending = [item for item in task.previous_questions if item.question_id in unresolved]
+            previous_text = {item.question.casefold() for item in task.previous_questions}
+            new_pending = [item for item in output.questions if item.question_id not in previous_ids
+                           and item.question.casefold() not in previous_text]
+            if not old_pending and not new_pending:
+                raise RoleRuleError("initial_outline ASK_USER requires at least one unresolved blocking question")
+            output = output.model_copy(update={"questions": tuple((*old_pending, *new_pending))})
+        else:
+            if unresolved:
+                raise RoleRuleError("initial_outline unresolved blocking questions must have new user evidence")
+            if output.content is None or output.questions or not output.target_roles or not output.discussion_focus:
+                raise RoleRuleError("initial_outline CREATE_OUTLINE needs content, target_roles and discussion_focus")
+            unique(list(output.target_roles), "target_roles")
+            if set(output.target_roles) - set(request.allowed_roles):
+                raise RoleRuleError("initial_outline target_roles outside allowed_roles")
+            try:
+                agenda_refs(output.content, output.discussion_targets)
+            except ValueError as exc:
+                raise RoleRuleError(str(exc)) from exc
+            _, report = prepare_working_draft(request, output)
+            if not report.can_publish:
+                blocking = [f"{finding.rule_id} at {finding.path}" for finding in report.findings if finding.blocks_publication]
+                raise RoleRuleError("initial_outline quality gate: " + "; ".join(blocking[:5]))
+        return output
     if isinstance(output, (HostOutput, CriticOutput)):
         unique(output.target_roles, "target_roles")
         if set(output.target_roles) - set(request.allowed_roles):
@@ -889,6 +1000,22 @@ def validate_output(request: RoleRequest, raw: str, *, allow_missing_agenda_outl
             if outcome == "objection" and any(item.divergence == "value" for item in output.objections):
                 raise RoleRuleError("use needs_clarification for a user decision")
             check_objections(request, output.objections, visible)
+            review = request.working_review
+            for suggestion in output.draft_suggestions:
+                if not review or request.focus or outcome == "no_new_input" or suggestion.target_id not in review.target_ids:
+                    raise RoleRuleError("draft suggestion must target an item in the assigned review")
+                check_sources(suggestion.source_seqs, visible, "draft_suggestions/source_seqs")
+                if suggestion.requires_user_confirmation and not any(
+                    objection.divergence == "value" and suggestion.target_id in objection.draft_refs
+                    for objection in output.objections
+                ):
+                    raise RoleRuleError("suggestion requires a linked user-decision objection")
+                if suggestion.severity != "advisory" and not any(
+                    suggestion.target_id in objection.draft_refs
+                    and (suggestion.severity != "blocking" or objection.severity == "blocking")
+                    for objection in output.objections
+                ):
+                    raise RoleRuleError("major or blocking suggestion requires a linked objection of sufficient severity")
         elif isinstance(output, StanceOutput):
             ids = [stance.option_id for stance in output.stances]
             unique(ids, "stance option IDs")
@@ -930,6 +1057,12 @@ def validate_output(request: RoleRequest, raw: str, *, allow_missing_agenda_outl
     elif isinstance(output, IntegrationOutput):
         if not output.source_seqs:
             raise RoleRuleError("integration source_seqs must cite at least one snapshot message")
+        if isinstance(output, WorkingIntegrationOutput):
+            ids = [decision.suggestion_id for decision in output.draft_decisions]
+            unique(ids, "draft_decisions/suggestion_id")
+            available = {item.suggestion_id for item in request.working_review.suggestions}
+            if set(ids) - available:
+                raise RoleRuleError("draft decision must reference an available suggestion from the current revision")
     elif isinstance(output, ReviewReport):
         output = merge_review_report(output, request.issues)
         check_review(request, output, visible)

@@ -1,6 +1,6 @@
 import { useId, useRef, useState } from 'react';
 import { formatInlineText } from './DiscussionMessageText';
-import type { ClarificationAnswer } from './discussions';
+import type { ClarificationAnswer, InitialQuestionDetail } from './discussions';
 
 function suggestedAnswers(question: string) {
   if (/中国大陆|地区|地域|市场范围|分发范围|region/i.test(question)) {
@@ -17,9 +17,10 @@ function suggestedAnswers(question: string) {
 
 type Answer = { choice: string | null; custom: string };
 
-export function ClarificationForm({ questions, options, busy, error, initialAnswers, hidden, onCancel, onSubmit }: {
+export function ClarificationForm({ questions, options, details, busy, error, initialAnswers, hidden, onCancel, onSubmit }: {
   questions: string[];
   options?: Record<string, string[]>;
+  details?: Record<string, InitialQuestionDetail>;
   busy: boolean;
   error: string;
   initialAnswers?: ClarificationAnswer[];
@@ -32,6 +33,7 @@ export function ClarificationForm({ questions, options, busy, error, initialAnsw
   const prompts = questions.length ? questions : ['你想补充什么？'];
   const suggestions = prompts.map((question) => {
     const supplied = options && Object.hasOwn(options, question) ? options[question] : undefined;
+    if (details && Object.hasOwn(details, question)) return supplied ?? [];
     return supplied?.length === 4 ? supplied : suggestedAnswers(question);
   });
   const [answers, setAnswers] = useState<Answer[]>(() => prompts.map((_, index) => {
@@ -65,6 +67,9 @@ export function ClarificationForm({ questions, options, busy, error, initialAnsw
           const group = `${titleId}-answer-${index}`;
           return <fieldset className="clarification-options" key={index} disabled={busy}>
             <legend>{prompts.length > 1 && `${index + 1}. `}{formatInlineText(question)}</legend>
+            {details?.[question] && <p>{details[question].reason}
+              {!!details[question].affected_modules.length && `（影响 ${details[question].affected_modules.join('、')}）`}
+            </p>}
             {suggestions[index].map((suggestion, optionIndex) => <label className="clarification-option" key={suggestion}>
               <input type="radio" name={group} checked={current.choice === suggestion}
                 onChange={() => updateAnswer(index, { choice: suggestion })} />

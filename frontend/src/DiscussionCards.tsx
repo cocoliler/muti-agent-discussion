@@ -74,7 +74,7 @@ export function InitialOutlineCard({ sessionId, draft, expanded, locate, discuss
   discuss?: (seq: number) => void;
 }) {
   const { content } = draft;
-  const agendaSeq = draft.source_seqs.at(-1);
+  const agendaSeq = draft.discussion_seq ?? draft.source_seqs.at(-1);
   const outlineBody = useRef<HTMLDivElement>(null);
   const { draft_id: draftId, schema_version: schemaVersion } = draft;
   useEffect(() => {
@@ -117,9 +117,14 @@ export function InitialOutlineCard({ sessionId, draft, expanded, locate, discuss
     };
   }, [sessionId, draftId, schemaVersion]);
   return <details className="workbench-artifact initial-outline" aria-label="初始设计框架" open={expanded || undefined}>
-    <summary>初始设计框架 · 未评审 <strong>{content.product_name}</strong></summary>
+    <summary>工作草稿{draft.revision ? ` v${draft.revision}` : ''} · 未评审 <strong>{content.product_name}</strong></summary>
     <div ref={outlineBody} className="initial-outline-body">
       <p>{content.positioning}</p>
+      {!!draft.quality_gate_result?.findings.length && <section>
+        <h3>质量检查提醒</h3>
+        <ul>{draft.quality_gate_result.findings.map((finding, index) =>
+          <li key={`${finding.rule_id}:${finding.path}:${index}`}>{finding.message}</li>)}</ul>
+      </section>}
       <div className="initial-outline-sections">{outlineSections.map(([label, key]) => {
         const entries = content[key];
         if (!entries?.length) return null;
@@ -127,6 +132,15 @@ export function InitialOutlineCard({ sessionId, draft, expanded, locate, discuss
         return <section key={key}><h3>{label}</h3>
           <List>{entries.map((entry, index) => <li key={index}>{entry}</li>)}</List></section>;
       })}</div>
+      {draft.working_changes && <details>
+        <summary>查看本轮修订意见（基于 v{draft.working_changes.base_revision}）</summary>
+        <ul>{draft.working_changes.edits.map(({ suggestion, decision, reason, message_seq }) =>
+          <li key={suggestion.suggestion_id}>
+            <strong>{{ accept: '采纳', reject: '未采纳', defer: '待处理' }[decision]}</strong> · {suggestion.proposed_change}
+            <p>{reason}</p>
+            <button type="button" onClick={() => locate(message_seq)}>查看发言 #{message_seq}</button>
+          </li>)}</ul>
+      </details>}
       <div className="references">
         {discuss && agendaSeq !== undefined && <button type="button" onClick={() => discuss(agendaSeq)}>基于框架讨论</button>}
         {draft.source_seqs.map((seq) => <button type="button" key={seq} onClick={() => locate(seq)}>来源 #{seq}</button>)}

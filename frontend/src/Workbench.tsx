@@ -509,7 +509,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     : clarificationMessage?.role === 'host' ? clarificationMessage.text.replace(/^需要用户补充关键事实：/, '') : undefined;
   const clarificationQuestions = session?.clarification?.questions ?? legacyQuestions?.split('；').map((part) => part.trim()).filter(Boolean) ?? [];
   const clarificationSeq = session?.clarification?.message_seq ?? clarificationMessage?.seq ?? null;
-  const clarificationKey = awaitingClarification ? `${session.id}:${session.input_version}:${clarificationSeq ?? 0}` : null;
+  const clarificationKey = awaitingClarification && clarificationQuestions.length
+    ? `${session.id}:${session.input_version}:${clarificationSeq ?? 0}` : null;
   const hostWorking = session?.participants.some((person) => person.role === 'host' && person.status === 'running');
   const waitingForAgenda = session?.waiting_for === 'host_agenda' && !paused;
   const agentsEnabled = session?.agent_mode === 'simulation' || session?.agent_mode === 'real';
@@ -711,7 +712,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
             </form>}
             {id && !session && !readError && <p role="status">正在恢复讨论…</p>}
             {session && clarificationKey && <ClarificationForm key={clarificationKey}
-              questions={clarificationQuestions} options={session.clarification?.options} busy={busy} error={error} hidden={!!editMessage}
+              questions={clarificationQuestions} options={session.clarification?.options} details={session.clarification?.details}
+              busy={busy} error={error} hidden={!!editMessage}
               onSubmit={(answer, answers) => command('/messages', {
                 text: answer, reply_to_seq: clarificationSeq, substantive: true, input_version: session.input_version,
                 ...(session.superseded_answer_seqs && clarificationSeq ? { clarification_answers: answers } : {}),

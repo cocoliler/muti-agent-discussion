@@ -111,6 +111,9 @@ def sign_off(
     if draft is None or draft.draft_id != draft_id:
         findings.append(Finding(Code.STALE_DRAFT, "/draft_id", "签收的草稿不是当前版本"))
         return SignOffResult(ok=False, findings=tuple(findings))
+    if getattr(draft, "working_schema_version", None) is not None:
+        findings.append(Finding(Code.NOT_SIGNED_OFF, "/draft_id", "工作草稿须经独立冻结和评审后才能签收"))
+        return SignOffResult(ok=False, findings=tuple(findings))
 
     if input_version != session.input_version or draft.input_version != session.input_version:
         findings.append(

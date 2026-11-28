@@ -3,6 +3,7 @@
 import asyncio
 import json
 import unittest
+from types import SimpleNamespace
 
 import httpx
 
@@ -28,6 +29,15 @@ def provider(handler):
 
 
 class DeepSeekTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_initial_outline_applies_policy_token_budget(self):
+        def respond(request):
+            self.assertEqual(json.loads(request.content)["max_tokens"], 180)
+            return httpx.Response(200, json=reply(usage={"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}))
+
+        request = SimpleNamespace(initial_task=SimpleNamespace(policy=SimpleNamespace(output_token_budget=180)))
+        result = await provider(respond).complete(request, MESSAGES)
+        self.assertEqual(result.usage, {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12})
+
     async def test_posts_one_json_request_to_official_endpoint_and_preserves_known_usage(self):
         received = []
 
