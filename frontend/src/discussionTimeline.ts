@@ -26,6 +26,7 @@ function isProgress(message: Message) {
 export function visibleMessages(messages: Message[], mode: DisplayMode, reveal: number | null) {
   if (mode !== 'compact') return messages;
   return messages.filter((message) => message.seq === reveal || message.role === 'user' ||
+    message.task_id?.includes(':analysis:') || (message.kind === 'statement' && !!message.issue_ids?.length) ||
     (!isProgress(message) && ['decision', 'draft', 'review', 'integration', 'clarification', 'challenge'].includes(message.kind)));
 }
 

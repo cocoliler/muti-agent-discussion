@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, discussionPath } from './discussions';
 import type { IssueDetail } from './discussions';
 
-const statuses: Record<string, string> = { open: '待处理', answered: '已回应', user_decided: '用户已裁决', closed: '已关闭' };
+const statuses: Record<string, string> = { open: '待处理', answered: '已回应', user_decided: '用户已裁决', closed: '已关闭', deferred: '暂缓 · 待验证' };
 
 export function IssueReferenceDialog({ sessionId, issueId, related, onClose, locate }: {
   sessionId: string;
@@ -44,7 +44,9 @@ export function IssueReferenceDialog({ sessionId, issueId, related, onClose, loc
         <button key={seq} type="button" onClick={() => jump(seq)}>来源 #{seq}</button>)}</div></>}
       <div className="references">
         {issue.response_seq !== null && <button type="button" onClick={() => jump(issue.response_seq!)}>查看回应 #{issue.response_seq}</button>}
-        {issue.closed_by_seq !== null && <button type="button" onClick={() => jump(issue.closed_by_seq!)}>查看关闭记录 #{issue.closed_by_seq}</button>}
+        {issue.closed_by_seq !== null && <button type="button" onClick={() => jump(issue.closed_by_seq!)}>
+          {issue.status === 'deferred' ? '查看暂缓依据' : '查看关闭记录'} #{issue.closed_by_seq}
+        </button>}
       </div>
     </> : error ? <p className="issue-summary" role="alert">{error}</p> : <p className="issue-summary" role="status">正在读取问题…</p>}
     {error && !!related.length && <><h3>关联消息</h3><div className="references">{related.map((seq) =>

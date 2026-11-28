@@ -128,6 +128,19 @@ class RoleContractTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.check(req, dict(output, **changes))
 
+    def test_structured_objection_requires_a_material_reason_to_ask_user(self):
+        req = task("critic", kind="challenge", allowed_roles=["architect"])
+        base = dict(description="改变首版允许的预约范围", owner_role="architect", source_seqs=[7],
+                    verification="核对首版范围", divergence="value", user_question="首版覆盖全部门店吗？")
+        output = dict(text="请核对预约边界", source_seqs=[7], objections=[base])
+        with self.assertRaisesRegex(RoleRuleError, "user_decision_scope"):
+            self.check(req, output)
+        value = self.check(req, dict(output, objections=[dict(base, user_decision_scope="product_scope")]))
+        self.assertEqual(value.objections[0].divergence, "value")
+        routine = dict(base, divergence="routine", user_question=None, proposed_resolution="显示已取整提示",
+                       reopen_if="用户要求界面仅显示数值")
+        self.assertEqual(self.check(req, dict(output, objections=[routine])).objections[0].divergence, "routine")
+
     def test_review_assigns_new_findings_to_current_specialists_and_keeps_historical_owners(self):
         req = task("reviewer", draft=frozen())
         current = dict(issue(), owner_role="designer", status="open", source_seqs=[7])

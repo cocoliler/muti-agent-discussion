@@ -28,8 +28,12 @@ MSG_COLUMNS = (
 )
 
 
+def _utc_timestamp(value: datetime) -> str:
+    return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return _utc_timestamp(datetime.now(timezone.utc))
 
 
 class NotFound(LookupError):
@@ -185,6 +189,8 @@ class DiscussionRepository:
             )
             self._insert_messages(conn, session, after_seq=0, created_at=now)
             self._sync_derived(conn, session, now)
+            self._record_milestone(conn, session.session_id, "input_received", str(session.input_version),
+                                   session.input_version, session.round_no, now)
             self._queue_run(conn, session.session_id, agent_mode)
             if idempotency is not None:
                 scope, key, request_hash, status_code, body = idempotency
@@ -342,6 +348,23 @@ class DiscussionRepository:
             high_water = self._high_water(conn, session.session_id)
             self._insert_messages(conn, session, after_seq=high_water, created_at=now)
             self._sync_derived(conn, session, now)
+            new_kinds = {m.kind.value for m in session.messages[high_water:]
+                         if m.input_version == session.input_version}
+            if action == "post_message" and (payload or {}).get("substantive"):
+                self._record_milestone(conn, session.session_id, "input_received", str(session.input_version),
+                                       session.input_version, session.round_no, now)
+            outline = getattr(session, "initial_draft", None)
+            if action == "submit_agenda" and "agenda" in new_kinds and outline and outline.working_schema_version:
+                self._record_milestone(conn, session.session_id, "outline_committed", outline.draft_id,
+                                       outline.input_version, 0, now)
+            draft = getattr(session, "current_draft", None)
+            if action == "submit_output" and "draft" in new_kinds and draft and session.status.value == "reviewing":
+                self._record_milestone(conn, session.session_id, "candidate_frozen", draft.draft_id,
+                                       draft.input_version, session.round_no, now)
+            if action == "submit_review" and "review" in new_kinds and session.reviews:
+                review = session.reviews[-1]
+                self._record_milestone(conn, session.session_id, "review_delivered", review.review_id,
+                                       review.input_version, session.round_no, now)
 
             self._queue_run(conn, session.session_id, agent_mode)
 
@@ -411,6 +434,54 @@ class DiscussionRepository:
             "active_draft_id": getattr(getattr(session, "current_draft", None), "draft_id", None),
             "codec_version": 1,
         }
+
+    @staticmethod
+    def _record_milestone(conn, session_id, stage, subject, input_version, round_no, now):
+        conn.execute(
+            "INSERT OR IGNORE INTO discussion_milestones VALUES (?,?,?,?,?,"
+            " (SELECT COALESCE(MAX(id), 0) FROM role_attempts WHERE session_id = ?), ?)",
+            (session_id, stage, subject, input_version, round_no, session_id, now),
+        )
+
+    def record_outline_visible(self, session_id: str, draft_id: str) -> None:
+        with self._write() as conn:
+            committed = conn.execute(
+                "SELECT m.input_version, m.round_no FROM discussion_milestones m"
+                " JOIN discussion_sessions s ON s.id = m.session_id"
+                " WHERE m.session_id = ? AND m.stage = 'outline_committed' AND m.subject = ?"
+                " AND s.deleted_at IS NULL AND s.input_version = m.input_version",
+                (session_id, draft_id),
+            ).fetchone()
+            if committed is None:
+                raise NotFound(draft_id)
+            self._record_milestone(conn, session_id, "outline_visible", draft_id,
+                                   committed["input_version"], committed["round_no"], utcnow())
+
+    def draft_metrics(self, session_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute("BEGIN")
+            if conn.execute("SELECT 1 FROM discussion_sessions WHERE id = ? AND deleted_at IS NULL",
+                            (session_id,)).fetchone() is None:
+                raise NotFound(session_id)
+            milestones = conn.execute(
+                "SELECT stage, subject, input_version, round_no, attempt_high_water, created_at"
+                " FROM discussion_milestones WHERE session_id = ? ORDER BY created_at, stage, subject",
+                (session_id,),
+            ).fetchall()
+            rows = conn.execute(
+                "SELECT id, logical_task_id, task_kind, attempt_no, input_version, status,"
+                " started_at, finished_at, elapsed_seconds, usage FROM role_attempts"
+                " WHERE session_id = ? ORDER BY id",
+                (session_id,),
+            ).fetchall()
+        attempts = []
+        for row in rows:
+            attempt = dict(row)
+            raw_usage = attempt.pop("usage")
+            usage = json.loads(raw_usage) if raw_usage else {}
+            attempts.append({**attempt, **{key: usage.get(key) for key in
+                                           ("prompt_tokens", "completion_tokens", "total_tokens")}})
+        return {"milestones": [dict(row) for row in milestones], "attempts": attempts}
 
     @staticmethod
     def _high_water(conn: sqlite3.Connection, session_id: str) -> int:
@@ -629,18 +700,23 @@ class DiscussionRepository:
         error: Mapping[str, Any] | None = None,
         output: str | None = None,
         elapsed_seconds: float | None = None,
+        started_at: datetime | None = None,
+        finished_at: datetime | None = None,
         lease_owner: str | None = None,
     ) -> None:
         with self._write() as conn:
             self._check_lease(conn, session_id, lease_owner)
             conn.execute(
-                "UPDATE role_attempts SET status = ?, usage = ?, error = ?, output = ?, finished_at = ?, elapsed_seconds = ?"
+                "UPDATE role_attempts SET status = ?, usage = ?, error = ?, output = ?,"
+                " started_at = COALESCE(?, started_at), finished_at = COALESCE(?, finished_at, ?), elapsed_seconds = ?"
                 " WHERE session_id = ? AND logical_task_id = ? AND attempt_no = ?",
                 (
                     status,
                     json.dumps(dict(usage), ensure_ascii=False) if usage else None,
                     json.dumps(dict(error), ensure_ascii=False) if error else None,
                     output,
+                    _utc_timestamp(started_at) if started_at else None,
+                    _utc_timestamp(finished_at) if finished_at else None,
                     utcnow(),
                     elapsed_seconds,
                     session_id,
@@ -661,7 +737,7 @@ class DiscussionRepository:
     def list_attempts(self, session_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT logical_task_id, attempt_no, role, task_kind, snapshot_ref, input_version,"
+                "SELECT id, logical_task_id, attempt_no, role, task_kind, snapshot_ref, input_version,"
                 " status, usage, error, output, started_at, finished_at, elapsed_seconds FROM role_attempts"
                 " WHERE session_id = ? ORDER BY logical_task_id, attempt_no",
                 (session_id,),

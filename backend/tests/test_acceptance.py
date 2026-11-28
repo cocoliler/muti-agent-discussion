@@ -42,6 +42,12 @@ EXPECTED_ROUTES = {
     ("GET", "/api/v1/discussions/{session_id}"),
     ("DELETE", "/api/v1/discussions/{session_id}"),
     ("GET", "/api/v1/discussions/{session_id}/drafts/{draft_id}"),
+    ("GET", "/api/v1/discussions/{session_id}/activity"),
+    ("GET", "/api/v1/discussions/{session_id}/events"),
+    ("GET", "/api/v1/discussions/{session_id}/issues/{issue_id}"),
+    ("GET", "/api/v1/discussions/{session_id}/working-drafts/{draft_id}"),
+    ("POST", "/api/v1/discussions/{session_id}/working-drafts/{draft_id}/visible"),
+    ("GET", "/api/v1/discussions/{session_id}/draft-metrics"),
     ("GET", "/api/v1/discussions/{session_id}/messages"),
     ("POST", "/api/v1/discussions/{session_id}/messages"),
     ("POST", "/api/v1/discussions/{session_id}/actions"),
@@ -107,7 +113,7 @@ class AcceptanceTest(unittest.TestCase):
     # ------------------------------------------------------------------ 契约
 
     def test_route_set_matches_spec_section(self) -> None:
-        """§6 只定义 6 个讨论操作，应用不额外注册路由。"""
+        """检查核心操作、讨论活动与草稿观测的公开路由集合。"""
         self.assertEqual(expected_routes(self.app), EXPECTED_ROUTES)
 
     def test_error_envelope_has_required_fields(self) -> None:

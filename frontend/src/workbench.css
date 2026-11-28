@@ -212,6 +212,12 @@
 .workbench-artifact span, .workbench-artifact a, .workbench-artifact button { font-size: 12px; }
 .workbench-artifact span { color: var(--muted); }
 .workbench-artifact button, .discussion-activity button { padding: 4px 7px; }
+.workbench-artifact.initial-outline { display: block; border-color: var(--border); }
+.initial-outline > summary strong { margin-inline-start: 8px; color: var(--ink); }
+.initial-outline-body { max-height: min(24dvh, 220px); overflow: auto; margin-top: 8px; font-size: 13px; }
+.initial-outline-sections { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr)); gap: 8px 14px; margin-top: 8px; }
+.initial-outline-sections h3 { font-size: 13px; }
+.initial-outline-sections :is(ul, ol) { padding-inline-start: 19px; }
 .discussion-activity { padding: 7px 10px; font-size: 12px; }
 .activity-heading, .activity-roles { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; }
 .activity-heading > span { color: var(--muted); }

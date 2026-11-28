@@ -70,9 +70,29 @@ def _host(req):
     else:
         action, questions = "ASK_USER", [f"谁能确认「{goal}」的首版范围？"]
         reason = "需要确认参与讨论的角色。"
-    return dict(text=f"本轮议题为「{req.topic or goal}」。{reason}", action=action, topic_id=req.topic_id,
-                target_roles=targets, issue_ids=[i.issue_id for i in blocking], questions=questions,
-                source_seqs=_sources(_latest(req, {"user", "scribe", "reviewer"})))
+    result = dict(text=f"本轮议题为「{req.topic or goal}」。{reason}", action=action, topic_id=req.topic_id,
+                  target_roles=targets, issue_ids=[i.issue_id for i in blocking], questions=questions,
+                  source_seqs=_sources(_latest(req, {"user", "scribe", "reviewer"})))
+    if req.kind == "agenda" and action == "DISCUSS":
+        audience = _field(req.user_input, "目标用户|用户|audience|users")
+        scope = _field(req.user_input, "约束|scope|constraints")
+        result["initial_outline"] = {
+            "product_name": _field(req.user_input, "项目名称|名称|name") or goal,
+            "positioning": f"围绕「{goal}」提供一条可试用的首版业务流程。",
+            "target_users": [audience or "直接办理这项事务的使用者（角色待确认）"],
+            "core_modules": ["业务操作入口", "业务规则校验", "结果反馈"],
+            "business_flow": ["进入操作入口", f"提交「{goal}」所需的信息", "校验后显示处理结果"],
+            "system_boundary": [scope or "首版覆盖单一核心场景，扩展场景留待确认。"],
+            "goals": [goal],
+            "scenarios": [f"{audience or '暂定使用者'}发起操作并查看结果。"],
+            "scope_in": [goal],
+            "module_relations": ["操作入口提交信息给规则校验，校验结果交给反馈模块。"],
+            "constraints": [scope] if scope else [],
+            "assumptions": ["暂按最小业务闭环组织功能。"],
+            "open_questions": ([] if audience else ["首版最常使用此功能的是谁？"])
+                + ([] if scope else ["有哪些场景或范围应明确留到后续版本？"]),
+        }
+    return result
 
 
 ADVICE = {

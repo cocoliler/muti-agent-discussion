@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from typing import Mapping
+import re
+from typing import Iterable, Mapping
 
 from .enums import (
     NAMABLE_ROLES,
@@ -17,7 +18,30 @@ from .enums import (
     Role,
     Severity,
 )
-from .models import Agenda, DiscussionSession, Issue
+from .models import Agenda, DiscussionSession, Issue, Message
+
+
+def normalize_issue_text(value: str | None) -> str:
+    return re.sub(r"[\s。！？；.!?;，,：:*]+", "", value or "").casefold()
+
+
+def issue_fingerprint(issue: Issue) -> tuple:
+    return (issue.topic_id, issue.kind, normalize_issue_text(issue.summary),
+            normalize_issue_text(issue.closure_condition))
+
+
+def has_new_user_evidence(messages: Mapping[int, Message], sources: Iterable[int], after: int) -> bool:
+    def is_new_user_input(seq: int) -> bool:
+        message = messages.get(seq)
+        return bool(message and seq > after and message.substantive and message.role == Role.USER)
+
+    for seq in sources:
+        message = messages.get(seq)
+        if message is None or not message.substantive or seq <= after:
+            continue
+        if is_new_user_input(seq) or (message.basis == "evidence" and any(map(is_new_user_input, message.source_seqs))):
+            return True
+    return False
 
 # --------------------------------------------------------------------- 引用
 
@@ -63,6 +87,12 @@ def validate_agenda(agenda: Agenda) -> tuple[str, ...]:
         problems.append("议题摘要不能为空")
     if not agenda.items:
         problems.append("至少需要一个议题")
+    if outline := agenda.initial_outline:
+        if not outline.product_name.strip() or not outline.positioning.strip():
+            problems.append("初始框架需要项目名称和定位")
+        sections = (outline.target_users, outline.core_modules, outline.business_flow, outline.system_boundary)
+        if any(not section or any(not entry.strip() for entry in section) for section in sections):
+            problems.append("初始框架需要目标用户、核心模块、业务流程和系统边界")
     seen: set[str] = set()
     for item in agenda.items:
         prefix = item.topic_id or "<空议题 ID>"

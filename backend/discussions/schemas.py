@@ -10,7 +10,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from discussion_orchestration.models import InitialOutline
+
 ActionType = Literal[
+    "request_analysis",
     "pause",
     "resume",
     "cancel",
@@ -210,6 +213,46 @@ class DiscussionList(_Strict):
     next_cursor: str | None = None
 
 
+class InitialDraftView(_Strict):
+    draft_id: str
+    input_version: int
+    content: InitialOutline
+    schema_version: int = 0
+    revision: int = 1
+    template_ref: str | None = None
+    policy_ref: str | None = None
+    source_seqs: list[int]
+
+
+class DraftMilestone(_Strict):
+    stage: Literal["input_received", "outline_committed", "outline_visible", "candidate_frozen", "review_delivered"]
+    subject: str
+    input_version: int
+    round_no: int
+    attempt_high_water: int
+    created_at: str
+
+
+class DraftMetricAttempt(_Strict):
+    id: int
+    logical_task_id: str
+    task_kind: str
+    attempt_no: int
+    input_version: int
+    status: str
+    started_at: str | None
+    finished_at: str | None
+    elapsed_seconds: float | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    total_tokens: int | None
+
+
+class DraftMetricsView(_Strict):
+    milestones: list[DraftMilestone]
+    attempts: list[DraftMetricAttempt]
+
+
 class SessionView(_Strict):
     export_url: str | None = None
     id: str
@@ -231,6 +274,7 @@ class SessionView(_Strict):
     agent_mode: str = "simulation"
     usage: SessionUsage = Field(default_factory=SessionUsage)
     active_draft: DraftDetail | None = None
+    initial_draft: InitialDraftView | None = None
     scorecard: ScorecardView | None = None
     drafts: list[DraftHistoryItem] = Field(default_factory=list)
     reviews: list[ReviewSummary] = Field(default_factory=list)

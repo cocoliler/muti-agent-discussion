@@ -1,6 +1,8 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
 from time import monotonic, sleep
+import asyncio
+import asyncio
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -402,6 +404,209 @@ class DiscussionAgentExecutionTest(unittest.TestCase):
                 # 价值分歧不派发点名回应：没有 response 消息，也不进入定向补充轮。
                 messages = client.get(f"/api/v1/discussions/{created.json()['id']}/messages").json()["items"]
                 self.assertFalse([m for m in messages if m["kind"] == "response"])
+
+    def test_issue_driven_selection_and_focused_analysis_keep_review_independent(self):
+        complete = SimulationProvider.complete
+        requests = []
+        running = set()
+
+        async def selected(provider, request, messages):
+            requests.append(request)
+            if request.focus == "核对异常恢复":
+                raise ProviderError("test_focus_failure")
+            if request.kind == "statement" and not request.focus:
+                running.add(request.role)
+                await asyncio.sleep(0)
+                self.assertEqual(running, {"product", "architect"})
+            response = await complete(provider, request, messages)
+            output = json.loads(response.content)
+            if request.kind == "agenda":
+                output["target_roles"] = ["product", "architect"]
+            elif request.kind == "statement" and request.role == "architect" and not request.focus:
+                output.update(disposition="no_new_input", text="没有新增问题")
+            elif request.kind == "challenge":
+                output = {"text": "已核对并发与边界，没有新增异议。", "no_new_issues": True,
+                          "source_seqs": [request.messages[-1].seq]}
+            elif request.focus:
+                output.update(text="取消预约后释放对应时段，并允许其他用户重新预约。")
+            return Completion(json.dumps(output), response.usage)
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(SimulationProvider, "complete", selected):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                created.raise_for_status()
+                path = f"/api/v1/discussions/{created.json()['id']}"
+                state = client.get(path).json()
+                self.assertEqual(state["status"], "awaiting_confirmation", state)
+                messages = client.get(f"{path}/messages").json()["items"]
+                self.assertEqual([m["role"] for m in messages if m["kind"] == "statement"], ["product"])
+                self.assertNotIn("response", [request.kind for request in requests])
+                review = next(request for request in requests if request.kind == "review")
+                self.assertIsNone(review.initial_outline)
+                self.assertEqual(review.draft.id, state["active_draft"]["draft_id"])
+                asked = client.post(f"{path}/actions", headers={"Idempotency-Key": str(uuid4())}, json={
+                    "type": "request_analysis", "expected_state_version": state["state_version"],
+                    "payload": {"role": "designer", "focus": "怎样设计取消预约？", "reply_to_seq": 1},
+                })
+                self.assertTrue(asked.json()["decision"]["ok"], asked.text)
+                focused = requests[-1]
+                self.assertEqual((focused.role, focused.focus), ("designer", "怎样设计取消预约？"))
+                self.assertTrue(focused.draft_excerpt)
+                final = client.get(path).json()
+                self.assertEqual(final["active_draft"], state["active_draft"])
+                self.assertEqual(final["reviews"], state["reviews"])
+                self.assertEqual(final["input_version"], state["input_version"])
+                messages = client.get(f"{path}/messages").json()["items"]
+                self.assertIn("释放对应时段", messages[-1]["text"])
+                self.assertEqual(messages[-1]["reply_to_seq"], messages[-2]["seq"])
+                asked = client.post(f"{path}/actions", headers={"Idempotency-Key": str(uuid4())}, json={
+                    "type": "request_analysis", "expected_state_version": final["state_version"],
+                    "payload": {"role": "architect", "focus": "核对异常恢复"},
+                })
+                self.assertTrue(asked.json()["decision"]["ok"], asked.text)
+                failed = client.get(path).json()
+                self.assertIn("test_focus_failure", [person["error_code"] for person in failed["participants"]])
+                task, = failed["pending_tasks"]
+                cancelled = client.post(f"{path}/actions", headers={"Idempotency-Key": str(uuid4())}, json={
+                    "type": "abandon_task", "expected_state_version": failed["state_version"],
+                    "payload": {"task_id": task["task_id"]},
+                })
+                self.assertTrue(cancelled.json()["decision"]["ok"], cancelled.text)
+                ready = client.get(path).json()
+                self.assertFalse(ready["pending_tasks"])
+                self.assertEqual(ready["status"], "awaiting_confirmation")
+                self.assertEqual(ready["reviews"], state["reviews"])
+                signed = client.post(f"{path}/confirm", headers={"Idempotency-Key": str(uuid4())}, json={
+                    "draft_id": ready["active_draft"]["draft_id"],
+                    "input_version": ready["input_version"], "expected_state_version": ready["state_version"],
+                })
+                self.assertTrue(signed.json()["decision"]["ok"], signed.text)
+
+    def test_issue_driven_blocking_specialist_finding_reaches_response_and_review(self):
+        complete = SimulationProvider.complete
+        requests = []
+
+        async def critical(provider, request, messages):
+            requests.append(request)
+            response = await complete(provider, request, messages)
+            source = request.messages[0].seq
+            output = json.loads(response.content)
+            if request.kind == "agenda":
+                output["target_roles"] = ["architect"]
+            elif request.kind == "statement":
+                output.update(disposition="objection", objections=[{
+                    "description": "预约冲突时需要明确用户反馈。", "owner_role": "designer",
+                    "severity": "blocking", "source_seqs": [source],
+                    "verification": "当两个请求互斥时，第二个请求显示冲突提示。",
+                }])
+            elif request.kind == "challenge":
+                output = {"text": "复核现有阻断项，无新增异议。", "no_new_issues": True, "source_seqs": [source]}
+            return Completion(json.dumps(output), response.usage)
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {
+                "DISCUSSION_AGENT_MODE": "simulation", "DISCUSSION_ROUTING_MODE": "shadow",
+        }), \
+                patch.object(SimulationProvider, "complete", critical):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                created.raise_for_status()
+                state = client.get(f"/api/v1/discussions/{created.json()['id']}").json()
+                response = next(request for request in requests if request.kind == "response")
+                review = next(request for request in requests if request.kind == "review")
+                self.assertEqual(response.role, "designer")
+                issue = response.issues[0]
+                self.assertEqual(issue.severity, "blocking")
+                self.assertTrue(any(item.issue_id == issue.issue_id for item in review.issues))
+                self.assertIn(state["status"], {"awaiting_confirmation", "clarifying"})
+                routing = next(event["payload"]["routing"] for event in service.repo.list_events(state["id"])
+                               if "routing" in (event["payload"] or {}))
+                self.assertEqual(routing, {"mode": "shadow", "comparison": [{
+                    "issue_id": issue.issue_id, "baseline": "designer", "suggested": "designer",
+                    "selected": "designer", "reason": "existing_owner", "applied_reason": "existing_owner",
+                }]})
+
+    def test_parallel_role_cap_keeps_remaining_roles_and_snapshot(self):
+        complete = SimulationProvider.complete
+        batch = 0
+        peak = 0
+        statements = []
+
+        async def observe(provider, request, messages):
+            nonlocal batch, peak
+            if request.kind != "statement":
+                return await complete(provider, request, messages)
+            batch += 1
+            peak = max(peak, batch)
+            statements.append(request)
+            try:
+                await asyncio.sleep(0)
+                return await complete(provider, request, messages)
+            finally:
+                batch -= 1
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(AgentExecution, "MAX_PARALLEL_ROLES", 2), patch.object(SimulationProvider, "complete", observe):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "名称：会议室预约。用户：行政人员。目标：预约会议室。",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                created.raise_for_status()
+                state = client.get(f"/api/v1/discussions/{created.json()['id']}").json()
+                self.assertEqual(state["status"], "awaiting_confirmation", state)
+                self.assertEqual(peak, 2)
+                self.assertCountEqual([request.role for request in statements], ["product", "architect", "designer"])
+                self.assertTrue(all(request.messages == statements[0].messages for request in statements))
+
+    def test_reversible_display_choice_is_decided_without_clarification(self):
+        complete = SimulationProvider.complete
+
+        async def calculator_critic(provider, request, messages):
+            response = await complete(provider, request, messages)
+            if request.kind != "challenge":
+                return response
+            source = next(message for message in request.messages if message.role == "user")
+            output = {
+                "text": "精确整除和取整后的结果容易混淆。",
+                "source_seqs": [source.seq],
+                "objections": [{
+                    "description": "加提示可以区分精确结果和取整结果，保留已确定的运算规则。",
+                    "owner_role": "designer",
+                    "source_seqs": [source.seq],
+                    "verification": "7÷2 显示 3 并提示已取整，6÷2 显示 3 且无提示。",
+                    "divergence": "routine",
+                    "proposed_resolution": "仅当除法发生取整时显示已取整提示",
+                    "reopen_if": "用户明确要求只显示数字",
+                }],
+            }
+            return Completion(json.dumps(output), response.usage)
+
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"DISCUSSION_AGENT_MODE": "simulation"}), \
+                patch.object(SimulationProvider, "complete", calculator_critic):
+            service = build_service(Path(directory) / "discussion.sqlite3")
+            with TestClient(create_app(service, with_agents=True)) as client:
+                created = client.post(f"/api/v1/projects/{uuid4()}/discussions", json={
+                    "idea": "名称：计算器。用户：普通用户。目标：完成基础四则运算。约束：除法结果已确定取整。",
+                }, headers={"Idempotency-Key": str(uuid4())})
+                self.assertEqual(created.status_code, 201, created.text)
+                path = f"/api/v1/discussions/{created.json()['id']}"
+                state = client.get(path).json()
+                self.assertEqual(state["status"], "awaiting_confirmation", state)
+                self.assertIsNone(state["clarification"])
+                messages = client.get(f"{path}/messages").json()["items"]
+                self.assertFalse(any(message["kind"] == "clarification" for message in messages))
+                decision = next(message for message in messages if message["kind"] == "decision"
+                                and "仅当除法发生取整时显示已取整提示" in message["text"])
+                self.assertIn("重开条件：用户明确要求只显示数字", decision["text"])
+                self.assertTrue(any(message["kind"] == "integration" and message["seq"] > decision["seq"]
+                                    for message in messages))
 
     def test_tradeoff_divergence_triggers_scoring_before_draft(self):
         complete = SimulationProvider.complete

@@ -15,6 +15,8 @@ from discussion_orchestration import (
     DiscussionEngine,
     DraftRevision,
     Issue,
+    IssueStatus,
+    MessageKind,
     Phase,
     ReasonCode,
     ReviewFinding,
@@ -82,6 +84,33 @@ class RoundLimitTest(unittest.TestCase):
         filtered = self.engine._remove_repeated_objections(session, output)
         self.assertEqual(filtered.raised_issues, (new_evidence,))
         self.assertIn("没有新证据", filtered.text)
+        escalation = replace(same, severity=Severity.BLOCKING)
+        filtered = self.engine._remove_repeated_objections(session, replace(output, raised_issues=(escalation,)))
+        self.assertEqual(filtered.raised_issues, (replace(original, severity=Severity.BLOCKING),))
+        session.issues[original.issue_id] = replace(original, status=IssueStatus.CLOSED, closed_by_seq=3)
+        post_closure = replace(new_evidence, issue_id="later", source_seqs=(1, 4))
+        filtered = self.engine._remove_repeated_objections(
+            session, replace(output, raised_issues=(same, new_evidence, post_closure)),
+        )
+        self.assertEqual(filtered.raised_issues, (post_closure,))
+
+    def test_deferred_issue_does_not_reopen_from_reworded_agent_claim(self) -> None:
+        session = build_session(self.engine)
+        decision = self.engine._append(session, Role.HOST, MessageKind.DECISION, "暂缓")
+        issue = Issue("old", "T1", Role.CHALLENGER, "重复预约", Severity.MAJOR,
+                      source_seqs=(1,), status=IssueStatus.DEFERRED, closed_by_seq=decision.seq)
+        session.issues[issue.issue_id] = issue
+        echo = self.engine._append(session, Role.ARCHITECT, MessageKind.STATEMENT, "预约可能重复",
+                                   source_seqs=(1,))
+        repeated = replace(issue, issue_id="later", status=IssueStatus.OPEN, source_seqs=(echo.seq,))
+        output = SpeakerOutput("task", session.session_id, Role.CHALLENGER, TaskKind.CHALLENGE,
+                               session.input_version, session.snapshot_ref, session.round_no, "T1",
+                               text="再次检查", raised_issues=(repeated,))
+        self.assertEqual(self.engine._remove_repeated_objections(session, output).raised_issues, ())
+        evidence = self.engine._append(session, Role.USER, MessageKind.USER_INPUT, "并发测试写入两条记录")
+        with_evidence = replace(repeated, source_seqs=(echo.seq, evidence.seq))
+        self.assertEqual(self.engine._remove_repeated_objections(session, replace(output, raised_issues=(with_evidence,)))
+                         .raised_issues, (with_evidence,))
 
     def test_directed_round_stops_at_limit(self) -> None:
         session = build_session(self.engine)

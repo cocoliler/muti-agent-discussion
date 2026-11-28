@@ -52,6 +52,26 @@ class AgendaItem:
 
 
 @dataclass(frozen=True)
+class InitialOutline:
+    product_name: str
+    positioning: str
+    target_users: tuple[str, ...]
+    core_modules: tuple[str, ...]
+    business_flow: tuple[str, ...]
+    system_boundary: tuple[str, ...]
+    assumptions: tuple[str, ...] = ()
+    open_questions: tuple[str, ...] = ()
+    goals: tuple[str, ...] = ()
+    scenarios: tuple[str, ...] = ()
+    scope_in: tuple[str, ...] = ()
+    scope_out: tuple[str, ...] = ()
+    module_relations: tuple[str, ...] = ()
+    external_dependencies: tuple[str, ...] = ()
+    constraints: tuple[str, ...] = ()
+    risks: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Agenda:
     """主持人提交的议题调度建议。"""
 
@@ -60,6 +80,8 @@ class Agenda:
     missing_facts: tuple[str, ...] = ()
     question_options: dict[str, tuple[str, ...]] = field(default_factory=dict)
     plain_summary: str | None = None
+    initial_outline: InitialOutline | None = None
+    outline_source_seqs: tuple[int, ...] = ()
 
     def item(self, topic_id: str) -> AgendaItem:
         for item in self.items:
@@ -188,6 +210,7 @@ class SpeakerTask:
     input_version: int
     message_seqs: tuple[int, ...] = ()
     issue_ids: tuple[str, ...] = ()
+    focus_seq: int | None = None
 
 
 @dataclass(frozen=True)
@@ -225,6 +248,7 @@ class SpeakerOutput:
     scorecard: Scorecard | None = None
     plain_summary: str | None = None
     no_new_issues: bool = False
+    disposition: str = "suggestion"
 
 
 @dataclass(frozen=True)
@@ -279,6 +303,7 @@ class DraftRevision:
     #: 本版本依据的评分卡与被采纳的方案，用于追溯「为什么这么定」。
     scorecard_id: str | None = None
     chosen_option_id: str | None = None
+    working_schema_version: int | None = None
 
 
 @dataclass(frozen=True)
@@ -343,6 +368,9 @@ class DiscussionSession:
     challenged_topics: set[str] = field(default_factory=set)
     closed_topics: set[str] = field(default_factory=set)
     drafts: list[DraftRevision] = field(default_factory=list)
+    # Working artifact for this input version. Only frozen candidates belong in drafts.
+    initial_draft: DraftRevision | None = None
+    previous_outlines: list[DraftRevision] = field(default_factory=list)
     reviews: list[ReviewResult] = field(default_factory=list)
     #: 每个议题的收敛评分卡（按输入版本），以及最终采纳的方案。
     scorecards: list[Scorecard] = field(default_factory=list)

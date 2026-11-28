@@ -7,7 +7,7 @@ import { AgentMessageText, DiscussionMessageText, IssueLinkContext } from './Dis
 import { IssueReferenceDialog } from './IssueReferenceDialog';
 import { LocalDiscussionHistory } from './LocalDiscussionHistory';
 import { ReviewFindings } from './ReviewFindings';
-import { ArtifactCard, ProgressEvents, SpeechCard } from './DiscussionCards';
+import { ArtifactCard, InitialOutlineCard, ProgressEvents, SpeechCard } from './DiscussionCards';
 import { DiscussionActivity } from './DiscussionActivity';
 import { discussionArtifact, displayModes, timelineEntries, visibleMessages } from './discussionTimeline';
 import type { DisplayMode } from './discussionTimeline';
@@ -73,6 +73,7 @@ function describeError(error: unknown) {
 }
 
 function describeAgentDiagnostic(role: string, diagnostic: string) {
+  if (diagnostic.includes('initial_outline')) return '主持人未能生成可用的初始设计框架。重试会根据当前需求重新开题。';
   if (diagnostic.startsWith('delivery preflight:')) return `稿件未通过导入预检，重试会修正规格。${diagnostic.replace('delivery preflight: ', '')}`;
   if (diagnostic.includes('scorecard')) return '方案评分未通过校验，重试会检查方案编号和五个评分维度。';
   if (/new_findings|reassessments|closed findings|account for all previous issues/.test(diagnostic)) {
@@ -126,6 +127,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const [idea, setIdea] = useState('');
   const [text, setText] = useState('');
   const [reply, setReply] = useState<number | null>(null);
+  const [analysisRole, setAnalysisRole] = useState('');
   const [substantive, setSubstantive] = useState(true);
   const [highlight, setHighlight] = useState<number | null>(null);
   const [mode, setMode] = useState<DisplayMode>(() => {
@@ -201,12 +203,14 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
       inflight = (async () => {
         try {
           const next = await api<Session>(discussionPath(id!), undefined, undefined, controller.signal);
-          const batch = next.last_seq > cursor ? await readMessages(id!, cursor, controller.signal) : [];
           if (controller.signal.aborted) return;
           setSession((current) => current?.id === next.id && (current.state_version > next.state_version || (
             current.state_version === next.state_version && current.export_url === next.export_url &&
             JSON.stringify(current.participants) === JSON.stringify(next.participants)
           )) ? current : next);
+          // The working draft is present in the snapshot and can render while history is loading.
+          const batch = next.last_seq > cursor ? await readMessages(id!, cursor, controller.signal) : [];
+          if (controller.signal.aborted) return;
           if (batch.length) {
             cursor = batch[batch.length - 1].seq;
             setMessages((current) => [...current, ...batch]);
@@ -290,6 +294,7 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
     setIdea('');
     setText('');
     setReply(null);
+    setAnalysisRole('');
     setAction('');
     setPayload('');
     setAgendaDraft(null);
@@ -438,11 +443,13 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
 
   const terminal = session?.status === 'completed' || session?.status === 'canceled';
   const paused = session?.status === 'paused';
+  const beginReply = useCallback((seq: number) => {
+    setReply(seq);
+    composer.current?.focus({ preventScroll: true });
+  }, []);
   const replyButton = useCallback((seq: number) => session && !terminal && !paused ?
-    <button type="button" disabled={busy} onClick={() => {
-      setReply(seq);
-      composer.current?.focus({ preventScroll: true });
-    }}>回复 #{seq}</button> : null, [!!session, terminal, paused, busy]);
+    <button type="button" disabled={busy} onClick={() => beginReply(seq)}>回复 #{seq}</button>
+    : null, [!!session, terminal, paused, busy, beginReply]);
   const supersededAnswers = new Set(session?.superseded_answer_seqs ?? []);
   const promptsBySeq = new Set(messages.filter((message) => message.kind === 'clarification').map((message) => message.seq));
   const latestAnswers = new Map<number, Message>();
@@ -481,7 +488,10 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const canReopen = session?.status === 'completed' && activeDraft != null;
   const revisionDraft = revision?.draftId === activeDraft?.draft_id ? revision : null;
   const reopening = canReopen && !!revisionDraft?.reopen;
-  const revisionTarget = (canConfirm && reply === null) || reopening ? activeDraft : null;
+  const availableAnalysis = session?.agent_mode !== 'off' && (session?.status === 'awaiting_confirmation' ||
+    (session?.status === 'discussing' && session.waiting_for === 'host_decision'));
+  const analysisMode = availableAnalysis && !!analysisRole;
+  const revisionTarget = !analysisMode && ((canConfirm && reply === null) || reopening) ? activeDraft : null;
   const revisionText = revisionDraft?.text ?? '';
   const canUseReviewReasons = activeDraft?.review_verdict === 'revise';
 
@@ -503,12 +513,14 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
   const hostWorking = session?.participants.some((person) => person.role === 'host' && person.status === 'running');
   const waitingForAgenda = session?.waiting_for === 'host_agenda' && !paused;
   const agentsEnabled = session?.agent_mode === 'simulation' || session?.agent_mode === 'real';
-  const autoExchange = agentsEnabled && (session?.waiting_for === 'role_results' || session?.waiting_for === 'review' || session?.waiting_for === 'host_decision');
+  const autoExchange = agentsEnabled && (session?.waiting_for === 'role_results' || session?.waiting_for === 'review' ||
+    session?.waiting_for === 'host_decision' || currentTasks.length > 0);
   const isWorkingRole = (role: string) => waitingForAgenda ? role === 'host'
     : session?.waiting_for === 'review' ? role === 'reviewer' : currentTasks.some((task) => task.role === role);
   const agentRunning = hostWorking || session?.participants.some((person) => isWorkingRole(person.role) && person.status === 'running');
   const failedAgent = session?.participants.find((person) => person.status === 'failed' && (
     isWorkingRole(person.role)));
+  const pendingAnalysis = currentTasks.find((task) => task.focus_seq != null);
   const projectIdea = messages.find((message) => message.kind === 'user_input' && message.substantive !== false)?.text;
   const latestIdea = messages.filter((message) => message.kind === 'user_input' && message.substantive !== false).at(-1)?.text.trim() ?? '';
   const editingAgenda = agendaDraft !== null && agendaDraft.version === session?.input_version;
@@ -621,6 +633,9 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
               : <a href="#live-spec-title">查看规格</a>}
           </div>}</header>
         {session && artifact && <ArtifactCard event={artifact} sessionId={session.id} open={() => showReference(null)} />}
+        {session?.initial_draft && <InitialOutlineCard key={session.initial_draft.draft_id}
+          sessionId={session.id} draft={session.initial_draft} expanded={!artifact} locate={locate}
+          discuss={!terminal && !paused && !busy ? beginReply : undefined} />}
         <div className="thread-pane">
           {id && roundStarts.some(([round]) => round > 0) && <nav className="round-nav" aria-label="聊天轮次">
             {roundStarts.map(([round, message]) => {
@@ -711,6 +726,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
                 {session.waiting_for === 'role_results' && !paused && !autoExchange && <p>收到角色结果后，会显示在讨论中。</p>}
               </div></div>
               {!paused && agentsEnabled && (waitingForAgenda || autoExchange) && !agentRunning && <button disabled={busy} onClick={() => act('run_agents')}>{failedAgent ? '重试 Agent' : '继续执行 Agent'}</button>}
+              {!paused && pendingAnalysis && <button disabled={busy} onClick={() =>
+                act('abandon_task', { task_id: pendingAnalysis.task_id })}>取消指定分析</button>}
               {session.status === 'awaiting_confirmation' && <a href="#live-spec-title" onClick={(event) => { event.preventDefault(); showSpec(); }}>查看待审阅规格</a>}
               {waitingForAgenda && !agentsEnabled && <form className="live-form agenda-form" onSubmit={(event) => {
                 event.preventDefault();
@@ -745,6 +762,16 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
           <form className="discussion-composer" onSubmit={(event) => {
             event.preventDefault();
             if (busy || paused) return;
+            if (analysisMode) {
+              if (text.trim() && currentTasks.length === 0) {
+                act('request_analysis', { role: analysisRole, focus: text.trim(), reply_to_seq: reply }, () => {
+                  setText('');
+                  setReply(null);
+                  setAnalysisRole('');
+                });
+              }
+              return;
+            }
             if (revisionTarget) {
               const reason = revisionText.trim();
               if (canUseReviewReasons || reason) {
@@ -763,20 +790,28 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
                 <button type="button" onClick={() => locate(reply)}>回复 #{reply}</button>
                 <button type="button" aria-label="取消回复" disabled={busy} onClick={() => setReply(null)}>×</button>
               </div>}
-              <textarea ref={composer} aria-label={revisionTarget ? '修订意见' : '讨论消息'}
+              <textarea ref={composer} aria-label={analysisMode ? '分析问题' : revisionTarget ? '修订意见' : '讨论消息'}
                 placeholder={revisionTarget ? (canUseReviewReasons ? '直接写下修订意见（可选）…' : '写下退回修订的理由…')
-                  : reply !== null ? `回复 #${reply}…` : '输入讨论消息…'}
+                  : analysisMode ? '写下希望该角色深入分析的问题…' : reply !== null ? `回复 #${reply}…` : '输入讨论消息…'}
                 rows={1} required={!revisionTarget || !canUseReviewReasons} maxLength={8000}
                 disabled={!!revisionTarget && busy} value={revisionTarget ? revisionText : text}
                 onChange={(event) => revisionTarget
                   ? setRevision({ draftId: revisionTarget.draft_id, text: event.target.value, reopen: reopening }) : setText(event.target.value)} />
             </>}
+            {availableAnalysis && !reopening && <label className="composer-context">
+              <select aria-label="指定专业 Agent" value={analysisRole}
+                disabled={busy || currentTasks.length > 0} onChange={(event) => setAnalysisRole(event.target.value)}>
+                <option value="">指定专业分析</option>
+                {['product', 'architect', 'designer', 'research', 'business'].map((role) =>
+                  <option key={role} value={role}>{roleLabels[role]}</option>)}
+              </select>
+            </label>}
             {revisionTarget ? <div className="composer-toolbar">
               {canUseReviewReasons && <span className="composer-context">退回后，Agent 会结合评审意见和你的补充修订。</span>}
               <button type="submit" className="primary composer-revision-submit"
                 disabled={busy || (!canUseReviewReasons && !revisionText.trim())}>确认退回 v{revisionTarget.version}</button>
             </div> : <div className="composer-toolbar">
-              {!paused && <label className="composer-context">
+              {!paused && !analysisMode && <label className="composer-context">
                 <input type="checkbox" checked={substantive} onChange={(event) => setSubstantive(event.target.checked)} />
                 更新需求上下文
               </label>}
@@ -784,7 +819,8 @@ export function Workbench({ openDemo }: { openDemo: () => void }) {
                 <button type="button" disabled={busy} onClick={() => act(paused ? 'resume' : 'pause')}>{paused ? '恢复讨论' : '暂停讨论'}</button>
                 <button type="button" disabled={busy} onClick={() => { if (window.confirm('取消后，此会话将结束。')) act('cancel'); }}>取消讨论</button>
               </div>
-              {!paused && <button type="submit" className="primary composer-send" aria-label="发送" title="发送" disabled={busy || !text.trim()}>
+              {!paused && <button type="submit" className="primary composer-send" aria-label={analysisMode ? '请求分析' : '发送'}
+                title={analysisMode ? '请求分析' : '发送'} disabled={busy || !text.trim() || (analysisMode && currentTasks.length > 0)}>
                 <span aria-hidden="true">↑</span>
               </button>}
             </div>}

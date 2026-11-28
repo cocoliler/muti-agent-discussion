@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Mapping
 
 from .enums import (
@@ -52,6 +52,8 @@ from .scoring import normalize_weights, rank_options
 from .scoring import validate as scorecard_problem
 from .state_machine import assert_transition, can_pause, can_resume, is_terminal
 from .validation import (
+    has_new_user_evidence,
+    issue_fingerprint,
     blocking_issue_ids,
     citation_problem,
     draft_blockers,
@@ -155,6 +157,9 @@ class DiscussionEngine:
         session.round_challenged = False
         session.round_kind = None
         session.phase = None
+        if session.initial_draft is not None:
+            session.previous_outlines.append(session.initial_draft)
+            session.initial_draft = None
         for draft in session.drafts:
             draft.current = False
 
@@ -188,10 +193,14 @@ class DiscussionEngine:
         problems = validate_agenda(agenda)
         if problems:
             return self._reject(session, ReasonCode.INVALID_AGENDA, "；".join(problems))
+        if agenda.initial_outline is not None:
+            problem = citation_problem(session, agenda.outline_source_seqs, None)
+            if problem:
+                return self._reject(session, problem[0], problem[1])
 
         session.agenda = agenda
         lead = agenda.items[0]
-        self._append(
+        agenda_message = self._append(
             session, Role.HOST, MessageKind.AGENDA, agenda.summary, topic_id=lead.topic_id,
             plain_summary=agenda.plain_summary,
         )
@@ -212,6 +221,16 @@ class DiscussionEngine:
                 detail={"missing_facts": list(agenda.missing_facts)},
             )
 
+        if agenda.initial_outline is not None:
+            session.initial_draft = DraftRevision(
+                draft_id=f"{session.session_id}-outline-v{session.input_version}",
+                version=0,
+                input_version=session.input_version,
+                content=asdict(agenda.initial_outline),
+                source_seqs=tuple(dict.fromkeys((*agenda.outline_source_seqs, agenda_message.seq))),
+                current=False,
+                working_schema_version=1,
+            )
         self._transition(session, SessionStatus.DISCUSSING)
         self._activate_topic(session, lead)
         return self._begin_round(session, RoundKind.FIRST)
@@ -282,6 +301,8 @@ class DiscussionEngine:
             return self.move_to_next_topic(session)
         if proposal.action == HostAction.DECIDE_ROUTINE:
             return self.decide_routine(session, proposal.issue_ids)
+        if proposal.action == HostAction.DEFER_ISSUES:
+            return self.defer_issues(session, proposal.issue_ids, proposal.reason)
         return self._reject(session, ReasonCode.INVALID_ASSIGNMENT, "未知的调度动作")
 
     def decide_routine(self, session: DiscussionSession, issue_ids: tuple[str, ...]) -> Decision:
@@ -306,7 +327,29 @@ class DiscussionEngine:
             issue.status = IssueStatus.CLOSED
             issue.closed_by_seq = message.seq
             issue.assignee = Role.HOST
+        if (session.phase in (Phase.CHALLENGE, Phase.RESPONSES) and session.round_challenged
+                and not session.open_issues(session.topic_id)):
+            return replace(self._enter_phase(session, Phase.INTEGRATION), seq=session.last_seq)
         return self._result(session, ReasonCode.OK, seq=session.last_seq)
+
+    def defer_issues(self, session: DiscussionSession, issue_ids: tuple[str, ...], reason: str) -> Decision:
+        if session.status != SessionStatus.DISCUSSING or session.waiting_for != WaitingFor.HOST_DECISION or session.tasks:
+            return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不能暂缓问题")
+        open_issues = {issue.issue_id: issue for issue in session.open_issues(session.topic_id)}
+        if (not issue_ids or not reason.strip() or len(set(issue_ids)) != len(issue_ids)
+                or any(identifier not in open_issues or open_issues[identifier].kind != DivergenceKind.FACT
+                       or open_issues[identifier].severity == Severity.BLOCKING or open_issues[identifier].needs_user
+                       for identifier in issue_ids)):
+            return self._reject(session, ReasonCode.INVALID_ISSUE, "只可暂缓当前议题中非阻断的事实问题")
+        message = self._append(session, Role.HOST, MessageKind.DECISION, reason, issue_ids=issue_ids,
+                               source_seqs=tuple(dict.fromkeys(seq for identifier in issue_ids
+                                                             for seq in open_issues[identifier].source_seqs)))
+        for identifier in issue_ids:
+            open_issues[identifier].status = IssueStatus.DEFERRED
+            open_issues[identifier].closed_by_seq = message.seq
+        if session.phase in (Phase.CHALLENGE, Phase.RESPONSES) and session.round_challenged and not session.open_issues(session.topic_id):
+            return self._enter_phase(session, Phase.INTEGRATION)
+        return self._result(session, ReasonCode.OK, seq=message.seq)
 
     def ask_user(
         self,
@@ -459,6 +502,39 @@ class DiscussionEngine:
         return self._enter_phase(session, Phase.DRAFTING)
 
     # ------------------------------------------------------------ 角色结果
+    def request_analysis(self, session: DiscussionSession, role: Role, focus: str,
+                         reply_to_seq: int | None = None) -> Decision:
+        available = session.status == SessionStatus.AWAITING_CONFIRMATION or (
+            session.status == SessionStatus.DISCUSSING and session.waiting_for == WaitingFor.HOST_DECISION)
+        if not available or session.tasks:
+            return self._reject(session, ReasonCode.INVALID_STATUS, "请在本轮任务完成后指定专业分析")
+        if role not in NAMABLE_ROLES or not focus.strip():
+            return self._reject(session, ReasonCode.CONTRACT_MISMATCH, "请指定专业角色和分析问题")
+        item = session.current_item()
+        if item is None or session.phase is None or session.round_kind is None:
+            return self._reject(session, ReasonCode.INVALID_TOPIC, "当前没有可分析的议题")
+        problem = citation_problem(session, (), reply_to_seq)
+        if problem:
+            return self._reject(session, problem[0], problem[1])
+        reference = next((entry for entry in session.messages if entry.seq == reply_to_seq), None)
+        if reference and session.agenda:
+            item = next((candidate for candidate in session.agenda.items if candidate.topic_id == reference.topic_id), item)
+        message = self._append(session, Role.USER, MessageKind.USER_INPUT, focus.strip(),
+                               topic_id=item.topic_id, reply_to_seq=reply_to_seq, substantive=False)
+        sources = set(self._context_seqs(session))
+        if reply_to_seq is not None:
+            sources.add(reply_to_seq)
+        task = SpeakerTask(
+            task_id=f"{session.session_id}:analysis:{session.dispatch_units}",
+            session_id=session.session_id, role=role, kind=TaskKind.STATEMENT, phase=session.phase,
+            round_kind=session.round_kind, round_no=session.round_no, topic_id=item.topic_id,
+            snapshot_ref=session.snapshot_ref, input_version=session.input_version,
+            message_seqs=tuple(sorted(sources)), focus_seq=message.seq,
+        )
+        session.tasks[task.task_id] = task
+        session.dispatch_units += 1
+        return self._result(session, ReasonCode.OK, tasks=(task,))
+
     def submit_output(self, session: DiscussionSession, output: SpeakerOutput) -> Decision:
         """校验并合并一份角色结果。旧输入版本的结果不能推进会话。"""
 
@@ -479,7 +555,13 @@ class DiscussionEngine:
                     "输入版本已更新，旧版本结果不能推进当前会话",
                 )
             return self._reject(session, ReasonCode.UNKNOWN_TASK, f"未知任务 {output.task_id}")
-        if session.status != SessionStatus.DISCUSSING or session.waiting_for != WaitingFor.ROLE_RESULTS:
+        focused = task.focus_seq is not None
+        if focused:
+            valid_status = session.status == SessionStatus.AWAITING_CONFIRMATION or (
+                session.status == SessionStatus.DISCUSSING and session.waiting_for == WaitingFor.HOST_DECISION)
+        else:
+            valid_status = session.status == SessionStatus.DISCUSSING and session.waiting_for == WaitingFor.ROLE_RESULTS
+        if not valid_status:
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不接受角色结果")
         if output.role != task.role or output.kind != task.kind:
             return self._reject(
@@ -502,12 +584,20 @@ class DiscussionEngine:
         problem = citation_problem(session, output.source_seqs, output.reply_to_seq)
         if problem:
             return self._reject(session, problem[0], problem[1])
+        if focused and (set(output.source_seqs) - set(task.message_seqs) or output.reply_to_seq not in (None, task.focus_seq)):
+            return self._reject(session, ReasonCode.CONTRACT_MISMATCH, "分析结果引用了任务快照之外的消息")
         problem = self._validate_payload(session, task, output)
         if problem:
             return self._reject(session, problem[0], problem[1])
 
-        if task.kind == TaskKind.CHALLENGE:
+        if output.raised_issues:
             output = self._remove_repeated_objections(session, output)
+
+        if task.kind == TaskKind.STATEMENT and output.disposition == "no_new_input" and not focused:
+            session.tasks.pop(task.task_id)
+            session.round_results[task.task_id] = output
+            self._bookkeep(session, task, output, session.last_seq)
+            return self._advance_or_wait(session, task.phase)
 
         text = f"不适用：{output.not_applicable}" if output.not_applicable else output.text
         seq = self._append(
@@ -515,16 +605,20 @@ class DiscussionEngine:
             output.role,
             _MESSAGE_KIND[task.kind],
             text,
-            reply_to_seq=output.reply_to_seq,
+            topic_id=task.topic_id,
+            reply_to_seq=task.focus_seq if focused else output.reply_to_seq,
             source_seqs=output.source_seqs,
             item_refs=output.item_refs,
             issue_ids=output.issue_ids
             or tuple(issue.issue_id for issue in output.raised_issues),
             task_id=task.task_id,
+            substantive=not focused,
             plain_summary=output.plain_summary,
             output=output,
         ).seq
         session.tasks.pop(task.task_id, None)
+        if focused:
+            return self._result(session, ReasonCode.OK, seq=seq)
         session.round_results[task.task_id] = output
         self._bookkeep(session, task, output, seq)
 
@@ -537,21 +631,40 @@ class DiscussionEngine:
     # ------------------------------------------------------------ 评审与签收
     @staticmethod
     def _remove_repeated_objections(session: DiscussionSession, output: SpeakerOutput) -> SpeakerOutput:
-        def fingerprint(issue: Issue):
-            def clean(value):
-                return re.sub(r"[\s。！？；.!?;，,：:*]+", "", value or "").casefold()
-            return (issue.topic_id, issue.kind, clean(issue.summary), clean(issue.closure_condition))
-
         earlier: dict[tuple, set[int]] = {}
+        closed_at: dict[tuple, int] = {}
+        deferred_at: dict[tuple, int] = {}
+        open_by_fingerprint: dict[tuple, Issue] = {}
         for issue in session.issues.values():
-            if issue.raised_by == Role.CHALLENGER and issue.input_version == session.input_version:
-                earlier.setdefault(fingerprint(issue), set()).update(issue.source_seqs)
-        accepted = tuple(issue for issue in output.raised_issues
-                         if not set(issue.source_seqs) <= earlier.get(fingerprint(issue), set()))
+            if issue.input_version == session.input_version:
+                key = issue_fingerprint(issue)
+                earlier.setdefault(key, set()).update(issue.source_seqs)
+                if issue.status != IssueStatus.OPEN:
+                    closed_at[key] = max(closed_at.get(key, 0), issue.closed_by_seq or issue.response_seq or 0)
+                    if issue.status == IssueStatus.DEFERRED:
+                        deferred_at[key] = max(deferred_at.get(key, 0), issue.closed_by_seq or 0)
+                elif key not in open_by_fingerprint or issue.severity == Severity.BLOCKING:
+                    open_by_fingerprint[key] = issue
+        messages = {message.seq: message for message in session.messages} if deferred_at else {}
+        accepted = []
+        for issue in output.raised_issues:
+            key = issue_fingerprint(issue)
+            existing = open_by_fingerprint.get(key)
+            if existing and existing.severity != Severity.BLOCKING and issue.severity == Severity.BLOCKING:
+                issue = replace(existing, severity=Severity.BLOCKING,
+                                source_seqs=tuple(dict.fromkeys((*existing.source_seqs, *issue.source_seqs))))
+                open_by_fingerprint[key] = issue
+                accepted.append(issue)
+                continue
+            novel = {seq for seq in issue.source_seqs if seq > closed_at.get(key, 0)} - earlier.get(key, set())
+            if novel and (key not in deferred_at or has_new_user_evidence(messages, novel, deferred_at[key])):
+                accepted.append(issue)
         repeated = len(output.raised_issues) - len(accepted)
         if not repeated:
-            return output
-        return replace(output, raised_issues=accepted, text=f"{output.text}\n\n{repeated} 条异议已有记录且没有新证据，未重新派发。")
+            return replace(output, raised_issues=tuple(accepted))
+        if not accepted and output.kind == TaskKind.STATEMENT:
+            return replace(output, raised_issues=(), disposition="no_new_input")
+        return replace(output, raised_issues=tuple(accepted), text=f"{output.text}\n\n{repeated} 条异议已有记录且没有新证据，未重新派发。")
 
     def submit_review(self, session: DiscussionSession, review: ReviewResult) -> Decision:
         """评审结论绑定草稿版本与输入版本。"""
@@ -708,6 +821,8 @@ class DiscussionEngine:
 
         if session.status != SessionStatus.AWAITING_CONFIRMATION:
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不能签收")
+        if session.tasks:
+            return self._reject(session, ReasonCode.PENDING_TASKS, "请等待指定的专业分析完成")
         draft = session.current_draft
         if draft is None or draft.draft_id != draft_id:
             return self._reject(session, ReasonCode.STALE_DRAFT, "签收的草稿不是当前版本")
@@ -756,6 +871,8 @@ class DiscussionEngine:
         """收到用户退回后，按本版评审问题和用户补充意见派发修订。"""
         if session.status not in (SessionStatus.AWAITING_CONFIRMATION, SessionStatus.COMPLETED):
             return self._reject(session, ReasonCode.INVALID_STATUS, "当前阶段不能要求修改")
+        if session.tasks:
+            return self._reject(session, ReasonCode.PENDING_TASKS, "请等待指定的专业分析完成")
         draft = session.current_draft
         if draft is None or (draft_id is not None and draft_id != draft.draft_id):
             return self._reject(session, ReasonCode.STALE_DRAFT, "请基于当前草稿提交修订意见")
@@ -809,8 +926,14 @@ class DiscussionEngine:
     ) -> Decision:
         """放弃不可恢复的任务，进入暂停等待用户决定。"""
 
-        if task_id not in session.tasks:
+        task = session.tasks.get(task_id)
+        if task is None:
             return self._reject(session, ReasonCode.UNKNOWN_TASK, f"未知任务 {task_id}")
+        if task.focus_seq is not None:
+            session.tasks.pop(task_id)
+            self._append(session, Role.USER, MessageKind.DECISION, "已取消本次指定分析",
+                         topic_id=task.topic_id, reply_to_seq=task.focus_seq, substantive=False)
+            return self._result(session, ReasonCode.OK, detail={"task_id": task_id})
         self._pause(session, reason or "角色任务失败，讨论暂停")
         return self._result(session, ReasonCode.OK, detail={"task_id": task_id})
 
@@ -1027,11 +1150,19 @@ class DiscussionEngine:
                     return (ReasonCode.REASON_REQUIRED, "「不适用」必须给出理由")
             elif not output.text.strip():
                 return (ReasonCode.EMPTY_OUTPUT, "发言正文不能为空")
-            if output.raised_issues:
-                return (ReasonCode.CONTRACT_MISMATCH, "只有质疑者可以提交质疑条目")
-            return None
+            if task.focus_seq is not None:
+                return (ReasonCode.CONTRACT_MISMATCH, "指定分析只记录建议，不变更当前草稿") if output.raised_issues else None
+            if output.disposition not in {"suggestion", "no_new_input", "objection", "needs_clarification"}:
+                return (ReasonCode.CONTRACT_MISMATCH, "未知专业分析结果")
+            if bool(output.raised_issues) != (output.disposition in {"objection", "needs_clarification"}):
+                return (ReasonCode.CONTRACT_MISMATCH, "只有异议或待澄清结果能提交问题")
+            needs_user = any(issue.kind == DivergenceKind.VALUE for issue in output.raised_issues)
+            if needs_user != (output.disposition == "needs_clarification"):
+                return (ReasonCode.CONTRACT_MISMATCH, "只有需要澄清的结果可提交用户裁决问题")
+            if not output.raised_issues:
+                return None
 
-        if task.kind == TaskKind.CHALLENGE:
+        if task.kind in (TaskKind.STATEMENT, TaskKind.CHALLENGE):
             if not output.text.strip():
                 return (ReasonCode.EMPTY_OUTPUT, "质疑发言正文不能为空")
             if output.no_new_issues:
@@ -1058,6 +1189,11 @@ class DiscussionEngine:
                     return (ReasonCode.INVALID_ISSUE, "质疑点名角色不在当前议题范围内")
                 if issue.topic_id != task.topic_id:
                     return (ReasonCode.INVALID_ISSUE, "问题所属议题与当前议题不一致")
+                if task.kind == TaskKind.STATEMENT and (issue.raised_by != task.role
+                        or max(issue.source_seqs, default=0) > max(task.message_seqs, default=0)):
+                    return (ReasonCode.CONTRACT_MISMATCH, "专业异议必须归属当前角色且引用派发快照")
+                if issue.kind == DivergenceKind.TRADEOFF and issue.severity == Severity.BLOCKING:
+                    return (ReasonCode.INVALID_ISSUE, "需要评分的取舍应标为重大，评分完成前不能成稿")
                 if not issue.summary.strip():
                     return (ReasonCode.INVALID_ISSUE, "问题描述不能为空")
                 if issue.kind == DivergenceKind.ROUTINE and (issue.severity == Severity.BLOCKING or issue.needs_user
@@ -1174,8 +1310,9 @@ class DiscussionEngine:
     ) -> None:
         if task.kind == TaskKind.STATEMENT:
             session.covered_statements.setdefault(task.topic_id, set()).add(task.role)
-        elif task.kind == TaskKind.CHALLENGE:
-            session.challenged_topics.add(task.topic_id)
+        if task.kind in (TaskKind.STATEMENT, TaskKind.CHALLENGE):
+            if task.kind == TaskKind.CHALLENGE:
+                session.challenged_topics.add(task.topic_id)
             for issue in output.raised_issues:
                 session.issues[issue.issue_id] = replace(
                     issue,

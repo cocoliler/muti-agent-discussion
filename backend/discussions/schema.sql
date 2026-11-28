@@ -148,6 +148,17 @@ CREATE TABLE IF NOT EXISTS discussion_events (
 CREATE INDEX IF NOT EXISTS idx_disc_events_session
   ON discussion_events(session_id, id DESC);
 
+CREATE TABLE IF NOT EXISTS discussion_milestones (
+  session_id         TEXT NOT NULL REFERENCES discussion_sessions(id),
+  stage              TEXT NOT NULL,
+  subject            TEXT NOT NULL,
+  input_version      INTEGER NOT NULL,
+  round_no           INTEGER NOT NULL,
+  attempt_high_water INTEGER NOT NULL,
+  created_at         TEXT NOT NULL,
+  PRIMARY KEY (session_id, stage, subject)
+) WITHOUT ROWID;
+
 -- 9) 持久化执行请求及会话级租约
 CREATE TABLE IF NOT EXISTS discussion_runs (
   session_id TEXT PRIMARY KEY REFERENCES discussion_sessions(id),

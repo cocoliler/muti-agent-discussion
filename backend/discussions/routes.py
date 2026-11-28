@@ -40,6 +40,8 @@ from .schemas import (
     CreateDiscussionRequest,
     DiscussionList,
     DraftDetail,
+    DraftMetricsView,
+    InitialDraftView,
     DecisionEnvelope,
     IssueDetail,
     MessagePage,
@@ -229,6 +231,19 @@ def create_router(
     def get_draft(session_id: str, draft_id: str, service: DiscussionService = service_dep) -> Any:
         return service.draft(_uuid(session_id, "session_id"), draft_id)
 
+    @router.get("/discussions/{session_id}/working-drafts/{draft_id}", response_model=InitialDraftView)
+    def get_working_draft(session_id: str, draft_id: str, service: DiscussionService = service_dep) -> Any:
+        return service.working_draft(_uuid(session_id, "session_id"), draft_id)
+
+    @router.get("/discussions/{session_id}/draft-metrics", response_model=DraftMetricsView)
+    def get_draft_metrics(session_id: str, service: DiscussionService = service_dep) -> Any:
+        return service.draft_metrics(_uuid(session_id, "session_id"))
+
+    @router.post("/discussions/{session_id}/working-drafts/{draft_id}/visible")
+    def mark_working_draft_visible(session_id: str, draft_id: str, service: DiscussionService = service_dep) -> Any:
+        service.record_outline_visible(_uuid(session_id, "session_id"), draft_id)
+        return {"recorded": True}
+
     @router.delete("/discussions/{session_id}", operation_id="deleteLocalDiscussion")
     def delete_discussion(session_id: str, service: DiscussionService = service_dep) -> dict[str, bool]:
         service.delete(_uuid(session_id, "session_id"))
@@ -355,7 +370,7 @@ def create_router(
             request_id=_request_id(request),
         )
         if agents is not None and payload["decision"]["ok"] and body.type in {"run_agents", "submit_agenda", "submit_output", "submit_review", "propose",
-                                                      "require_changes", "resume"}:
+                                                      "require_changes", "resume", "request_analysis", "abandon_task"}:
             background_tasks.add_task(agents.run, service, sid)
         return JSONResponse(payload, status_code=status)
 

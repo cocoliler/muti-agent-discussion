@@ -28,6 +28,15 @@ test('execution events group only when their role, round and adjacency match', (
   assert.deepEqual(entries[0].messages.map(({ seq }) => seq), [1, 2]);
 });
 
+test('compact mode shows specialist findings and requested analysis', () => {
+  const messages = [
+    message(1, 'product', 'statement'),
+    { ...message(2, 'architect', 'statement'), issue_ids: ['I-1'] },
+    { ...message(3, 'designer', 'statement'), task_id: 's:analysis:9' },
+  ];
+  assert.deepEqual(visibleMessages(messages, 'compact', null).map(({ seq }) => seq), [2, 3]);
+});
+
 test('a pending draft stays separate from a signed artifact', () => {
   const draft = { draft_id: 'd1', version: 1, content: {} };
   const session = { active_draft: draft, drafts: [{ draft_id: 'd1', signed: false }], status: 'awaiting_confirmation' };

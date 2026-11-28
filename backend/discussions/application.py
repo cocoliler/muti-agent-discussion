@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Mapping
 
-from discussion_orchestration.enums import MAX_DIRECTED_ROUNDS
+from discussion_orchestration.enums import MAX_DIRECTED_ROUNDS, Role
 from discussion_orchestration.models import ClarificationAnswer
 from discussion_orchestration.scoring import rank_options
 from spec_handoff import DraftSpec
@@ -145,6 +145,39 @@ class DiscussionService:
     def view(self, session_id: str) -> dict[str, Any]:
         session, meta = self._load(session_id)
         return self._render(session, meta)
+
+    @staticmethod
+    def _outline_view(draft: Any) -> dict[str, Any]:
+        schema_version = draft.working_schema_version or 0
+        return {
+            "draft_id": draft.draft_id,
+            "input_version": draft.input_version,
+            "revision": 1,
+            "schema_version": schema_version,
+            "template_ref": "initial-outline@1" if schema_version == 1 else None,
+            "policy_ref": "outline-first@1" if schema_version == 1 else None,
+            "content": dict(draft.content),
+            "source_seqs": list(draft.source_seqs),
+        }
+
+    def working_draft(self, session_id: str, draft_id: str) -> dict[str, Any]:
+        session, _ = self._load(session_id)
+        for draft in (session.initial_draft, *session.previous_outlines):
+            if draft is not None and draft.draft_id == draft_id:
+                return self._outline_view(draft)
+        raise ApiError("NOT_FOUND", "找不到工作草稿", status=404)
+
+    def draft_metrics(self, session_id: str) -> dict[str, Any]:
+        try:
+            return self.repo.draft_metrics(session_id)
+        except NotFound as exc:
+            raise ApiError("NOT_FOUND", "找不到讨论会话", status=404) from exc
+
+    def record_outline_visible(self, session_id: str, draft_id: str) -> None:
+        try:
+            self.repo.record_outline_visible(session_id, draft_id)
+        except NotFound as exc:
+            raise ApiError("NOT_FOUND", "找不到可确认展示的工作草稿", status=404) from exc
 
     def activity_marker(self, session_id: str) -> tuple[Any, ...]:
         try:
@@ -471,6 +504,19 @@ class DiscussionService:
             except CodecError as exc:
                 raise ApiError("VALIDATION_FAILED", str(exc), status=422) from exc
 
+        def request_analysis():
+            try:
+                role = Role(payload.get("role"))
+            except (ValueError, TypeError) as exc:
+                raise ApiError("VALIDATION_FAILED", "未知的分析角色", status=422) from exc
+            focus = payload.get("focus")
+            reply = payload.get("reply_to_seq")
+            if not isinstance(focus, str) or not 0 < len(focus.strip()) <= 8000:
+                raise ApiError("VALIDATION_FAILED", "请填写要分析的问题", status=422)
+            if reply is not None and (type(reply) is not int or reply < 1):
+                raise ApiError("VALIDATION_FAILED", "引用消息序号无效", status=422)
+            return engine.request_analysis(session, role, focus, reply)
+
         def submit_output():
             output = decode_payload("SpeakerOutput")
             task = session.tasks.get(output.task_id)
@@ -484,6 +530,7 @@ class DiscussionService:
             return engine.submit_output(session, output)
 
         handler = {
+            "request_analysis": request_analysis,
             "pause": lambda: engine.pause(session, payload.get("reason", "")),
             "resume": lambda: engine.resume(session),
             "cancel": lambda: engine.cancel(session, payload.get("reason", "")),
@@ -540,7 +587,9 @@ class DiscussionService:
             scope, key, request_hash = idempotency
             key_tuple = (scope, key, request_hash, 200, json.dumps(body, ensure_ascii=False))
         schedule = lease_owner is None and (
-            action in {"run_agents", "submit_agenda", "submit_output", "submit_review", "propose", "require_changes", "resume"}
+            action in {"run_agents", "submit_agenda", "submit_output", "submit_review", "propose", "require_changes",
+                       "resume", "request_analysis"}
+            or (action == "abandon_task" and session.status.value == "discussing")
             or (action == "post_message" and payload["substantive"])
         )
         replayed = self._save_with_replay(
@@ -710,6 +759,7 @@ class DiscussionService:
         if signed_draft := meta.get("signed_draft_id"):
             signed_drafts.add(signed_draft)
         draft = getattr(session, "current_draft", None)
+        initial_draft = getattr(session, "initial_draft", None)
         return {
             "id": session.session_id,
             "project_id": session.project_id,
@@ -732,6 +782,7 @@ class DiscussionService:
             "pending_tasks": [self._task_view(task) for task in getattr(session, "tasks", {}).values()],
             "agent_mode": self.agent_mode,
             "active_draft": self._draft_view(session, draft) if draft else None,
+            "initial_draft": self._outline_view(initial_draft) if initial_draft else None,
             "scorecard": self._scorecard_view(session),
             # §6 要求返回"草稿、评审"：历史以版本摘要呈现，正文在 active_draft
             "drafts": [
@@ -824,7 +875,8 @@ class DiscussionService:
         """参与者状态：调用尝试 > 本轮已发言 > 已派发待执行。"""
         latest: dict[str, dict[str, Any]] = {}
         pending_tasks = getattr(session, "tasks", {})
-        current_ids = set(pending_tasks) | {m.task_id for m in session.messages if m.round_no == session.round_no}
+        current_ids = (set(pending_tasks) | set(getattr(session, "round_results", {}))
+                       | {m.task_id for m in session.messages if m.round_no == session.round_no})
         if session.current_draft:
             current_ids.add(f"{session.current_draft.draft_id}:agent:review")
         for attempt in attempts:

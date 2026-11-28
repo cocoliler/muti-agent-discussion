@@ -32,6 +32,34 @@ export type DraftVersion = {
   open_issue_ids: string[];
 };
 
+export type InitialDraft = {
+  draft_id: string;
+  input_version: number;
+  schema_version?: number;
+  revision?: number;
+  template_ref?: string | null;
+  policy_ref?: string | null;
+  source_seqs: number[];
+  content: {
+    product_name: string;
+    positioning: string;
+    target_users: string[];
+    core_modules: string[];
+    business_flow: string[];
+    system_boundary: string[];
+    assumptions: string[];
+    open_questions: string[];
+    goals?: string[];
+    scenarios?: string[];
+    scope_in?: string[];
+    scope_out?: string[];
+    module_relations?: string[];
+    external_dependencies?: string[];
+    constraints?: string[];
+    risks?: string[];
+  };
+};
+
 export type Draft = DraftVersion & {
   review_verdict: string | null;
   delivery_status?: 'pending_review' | 'invalid' | 'blocked_review' | 'ready' | null;
@@ -128,6 +156,7 @@ export type Session = {
   pending_tasks?: Task[];
   agent_mode?: 'simulation' | 'real' | 'off';
   active_draft: Draft | null;
+  initial_draft?: InitialDraft | null;
   scorecard?: Scorecard | null;
   drafts: (DraftVersion & { current: boolean })[];
   reviews: { review_id: string; draft_id: string; verdict: string; findings: Finding[] }[];
@@ -146,9 +175,10 @@ export type Task = {
   phase?: string;
   message_seqs?: number[];
   issue_ids?: string[];
+  focus_seq?: number | null;
 };
 
-export type Action = 'pause' | 'resume' | 'cancel' | 'retry' | 'run_agents' | 'abandon_task' |
+export type Action = 'pause' | 'resume' | 'cancel' | 'retry' | 'run_agents' | 'abandon_task' | 'request_analysis' |
   'require_changes' | 'submit_output' | 'submit_review' | 'submit_agenda' | 'propose';
 
 export type Handoff = { draft_id: string; confirmed_at: string; content_hash: string | null; export_url: string | null };

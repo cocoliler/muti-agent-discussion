@@ -9,20 +9,25 @@ from uuid import uuid4
 
 from discussion_orchestration import (
     DivergenceKind,
+    IssueStatus,
     MessageKind,
     Role,
+    Severity,
     SessionStatus,
     TaskKind,
     WaitingFor,
 )
+from discussion_orchestration.enums import NAMABLE_ROLES
 from spec_handoff.draft import DraftSpec
 
 from backend.roles.contracts import CandidateOption, DraftSnapshot, PriorIssue, RoleRequest, SourceMessage, build_draft_content
 from backend.roles.provider import DeepSeekProvider
 from backend.roles.runner import RoleRunner
 from backend.roles.simulation import SimulationProvider
+from .codec import encode
 from .errors import ApiError
 from .repository import LeaseLost, VersionConflict
+from .routing import fact_routes, stalled_facts
 
 if TYPE_CHECKING:
     from .application import DiscussionService
@@ -46,11 +51,15 @@ class Job:
 class AgentExecution:
     LEASE_SECONDS = 120
     MAX_ACTIVE_SESSIONS = 4
+    MAX_PARALLEL_ROLES = 3
 
     def __init__(self) -> None:
         self.mode = os.environ.get("DISCUSSION_AGENT_MODE", "simulation").strip().lower()
         if self.mode not in ("simulation", "real", "off"):
             raise ValueError("DISCUSSION_AGENT_MODE must be simulation, real, or off")
+        self.routing_mode = os.environ.get("DISCUSSION_ROUTING_MODE", "shadow").strip().lower()
+        if self.routing_mode not in ("shadow", "active"):
+            raise ValueError("DISCUSSION_ROUTING_MODE must be shadow or active")
         self.active: set[str] = set()
         self.session_slots = asyncio.Semaphore(self.MAX_ACTIVE_SESSIONS)
 
@@ -118,7 +127,7 @@ class AgentExecution:
             if runner.call_limit - runner.calls_used < runner.MAX_ATTEMPTS:
                 runner = RoleRunner(session_id, provider, mode=self.mode)
             slots = (runner.call_limit - runner.calls_used) // runner.MAX_ATTEMPTS
-            jobs = jobs[:slots]
+            jobs = jobs[:min(slots, self.MAX_PARALLEL_ROLES)]
             starts = [self._start(service, job, owner) for job in jobs]
             results = await asyncio.gather(*(runner.run(job.request, validation_diagnostic=diagnostic)
                                              for job, (_, diagnostic) in zip(jobs, starts)), return_exceptions=True)
@@ -130,14 +139,15 @@ class AgentExecution:
                     continue
                 applied = False
                 error = result.error
+                # Count validation retries in the milestone written by the result commit.
+                for index in range(1, len(result.attempts)):
+                    self._record(service, job, owner, number + index)
                 if result.output is not None:
                     try:
                         applied = self._apply(service, job, result.output, owner)
                     except (ApiError, VersionConflict) as exc:
                         error = getattr(exc, "code", "REVISION_CONFLICT")
                 for index, attempt in enumerate(result.attempts):
-                    if index:
-                        self._record(service, job, owner, number + index)
                     last = index == len(result.attempts) - 1
                     code = error if last else attempt.error
                     status = "FAILED" if code else "SUCCEEDED" if applied else "IGNORED"
@@ -145,7 +155,8 @@ class AgentExecution:
                     if code == "invalid_output" and attempt.diagnostic:
                         failure["diagnostic"] = attempt.diagnostic
                     self._finish(service, job, owner, number + index, status, usage=attempt.usage,
-                                 error=failure, elapsed_seconds=attempt.elapsed_seconds)
+                                 error=failure, elapsed_seconds=attempt.elapsed_seconds,
+                                 started_at=attempt.started_at, finished_at=attempt.finished_at)
                 if not result.attempts:
                     self._finish(service, job, owner, number, "FAILED", error={"code": error or "NO_OUTPUT"})
                 failed |= bool(error)
@@ -177,18 +188,30 @@ class AgentExecution:
             item = session.current_item()
             issues = session.open_issues(item.topic_id)
             routine = [issue.issue_id for issue in issues if issue.kind == DivergenceKind.ROUTINE and not issue.needs_user]
+            stalled = stalled_facts(session, issues)
+            stalled_blockers = [issue for issue in stalled if issue.severity == Severity.BLOCKING]
+            stalled_advisories = [issue.issue_id for issue in stalled if issue.severity != Severity.BLOCKING]
             if routine:
                 proposal = {"action": "decide_routine", "issue_ids": routine}
-            elif any(issue.needs_user for issue in issues):
-                issues = [issue for issue in issues if issue.needs_user]
+            elif stalled_advisories:
+                proposal = {"action": "defer_issues", "issue_ids": stalled_advisories,
+                            "reason": "两次核对得出相同结论，暂无新的独立依据。这些非阻断问题保留为待验证项。"}
+            elif stalled_blockers or any(issue.needs_user for issue in issues):
+                questions_by_id = {
+                    issue.issue_id: f"「{issue.summary}」经过两次核对仍缺少依据。请提供能验证「{issue.closure_condition or issue.summary}」的业务事实或限制。"
+                    for issue in stalled_blockers
+                }
+                issues = [issue for issue in issues if issue.needs_user or issue.issue_id in questions_by_id]
                 questions = list(dict.fromkeys(
-                    issue.user_question
+                    questions_by_id.get(issue.issue_id) or issue.user_question
                     or (issue.summary if len(issue.summary) <= 200 and "\n" not in issue.summary else
                         f"关于「{item.title}」，首版应优先满足哪些业务约束？请说明你的取舍。")
                     for issue in issues
                 ))
                 proposal = {"action": "ask_user", "questions": questions,
                             "issue_ids": [issue.issue_id for issue in issues]}
+                if stalled_blockers:
+                    proposal["stall_issue_ids"] = list(questions_by_id)
             elif issues:
                 # 权衡分歧不能点名争论，交给引擎的收敛打分；只有事实分歧才点名回应。
                 assignable = [issue for issue in issues if issue.kind != DivergenceKind.TRADEOFF]
@@ -196,13 +219,16 @@ class AgentExecution:
                     items = session.agenda.items
                     proposal = {"action": "submit_draft" if item == items[-1] else "next_topic"}
                 else:
-                    assignments = {}
-                    sources = {message.seq: message.role for message in session.messages}
-                    for issue in assignable:
-                        role = issue.assignee if issue.assignee in item.role_scope else next((sources.get(seq) for seq in reversed(issue.source_seqs)
-                                                       if sources.get(seq) in item.role_scope), item.role_scope[0])
-                        assignments.setdefault(role.value, []).append(issue.issue_id)
-                    proposal = {"action": "name_responses", "assignments": assignments}
+                    assignments, comparison = fact_routes(assignable, item.role_scope, session.messages,
+                                                          active=self.routing_mode == "active")
+                    explanation = {"existing_owner": "已有负责角色", "capability_match": "能力匹配",
+                                   "source_author": "熟悉现有依据", "topic_scope": "议题范围内的默认角色"}
+                    reason = "点名回应：" + "；".join(
+                        f"{route['issue_id']} 由 {route['selected']} 核对（{explanation[route['applied_reason']]}）"
+                        for route in comparison
+                    )
+                    proposal = {"action": "name_responses", "assignments": assignments, "reason": reason,
+                                "routing": {"mode": self.routing_mode, "comparison": comparison}}
             else:
                 items = session.agenda.items
                 proposal = {"action": "submit_draft" if item == items[-1] else "next_topic"}
@@ -211,7 +237,7 @@ class AgentExecution:
                             and current.last_seq == session.last_seq and current.input_version == session.input_version,
                             owner=owner, allow_rejection=True):
                 session, _ = service._load(session.session_id)
-                if routine:
+                if proposal["action"] in ("decide_routine", "defer_issues"):
                     return self._next_jobs(service, session, owner)
         return self._jobs(session)
 
@@ -224,7 +250,9 @@ class AgentExecution:
             return []
         idea = "\n".join(m.text for m in user_messages)
         if session.status == SessionStatus.CLARIFYING and session.waiting_for == WaitingFor.HOST_AGENDA:
-            return [self._job(session, user_messages, idea, "host", "agenda", session.topic_id or "T1")]
+            latest = session.drafts[-1] if session.drafts else None
+            return [self._job(session, user_messages, idea, "host", "agenda", session.topic_id or "T1",
+                              draft_excerpt=self._draft_excerpt(latest))]
         item = session.current_item()
         topic = f"{item.title}｜{item.question}" if item else None
         draft = session.current_draft
@@ -235,10 +263,20 @@ class AgentExecution:
                 parent_id = next((d.draft_id for d in session.drafts if d.version == draft.version - 1), None)
             return [self._job(session, history, idea, "reviewer", "review", session.topic_id or "T1",
                               topic=topic, allowed_roles=session.review_roles(), draft=draft, issues=self._pending_review_issues(session, parent_id, history))]
-        if session.status != SessionStatus.DISCUSSING or session.waiting_for != WaitingFor.ROLE_RESULTS:
+        if session.status not in (SessionStatus.DISCUSSING, SessionStatus.AWAITING_CONFIRMATION):
             return []
         jobs = []
         for task in session.tasks.values():
+            if task.focus_seq is not None:
+                focus = next(m for m in session.messages if m.seq == task.focus_seq)
+                messages = [m for m in session.messages if m.seq in task.message_seqs and m.seq not in replaced]
+                focused_item = session.agenda.item(task.topic_id)
+                jobs.append(self._job(session, messages, idea, task.role.value, task.kind.value, task.topic_id,
+                                      task=task, topic=f"{focused_item.title}｜{focused_item.question}", focus=focus.text,
+                                      draft_excerpt=self._draft_excerpt(draft)))
+                continue
+            if session.status != SessionStatus.DISCUSSING or session.waiting_for != WaitingFor.ROLE_RESULTS:
+                continue
             all_messages = task.kind in (TaskKind.INTEGRATION, TaskKind.DRAFT, TaskKind.SCORING)
             # Recover older evidence without exposing messages committed after dispatch.
             cutoff = max(task.message_seqs, default=0)
@@ -251,7 +289,7 @@ class AgentExecution:
                 answered = [issue for issue in session.issues.values()
                             if issue.input_version == session.input_version and issue.assignee
                             and issue.response and issue.response_seq in visible and issue.issue_id not in known]
-                peer_answers = [issue for issue in answered if issue.raised_by == Role.CHALLENGER
+                peer_answers = [issue for issue in answered if issue.raised_by != Role.USER
                                 and issue.topic_id == task.topic_id]
                 decisions = [issue for issue in session.issues.values() if issue.kind == DivergenceKind.ROUTINE
                              and issue.input_version == session.input_version and issue.topic_id == task.topic_id
@@ -261,10 +299,18 @@ class AgentExecution:
                     for issue in [*(item for item in answered if item.raised_by == Role.USER), *peer_answers[-8:]]
                 )
                 issues.extend(self._prior_issue(visible, issue, "recorder") for issue in decisions[-8:])
+                issues.extend(self._prior_issue(visible, issue, "recorder") for issue in session.issues.values()
+                              if issue.status == IssueStatus.DEFERRED and issue.input_version == task.input_version
+                              and issue.closed_by_seq in visible and issue.issue_id not in known
+                              and (task.kind == TaskKind.DRAFT or issue.topic_id == task.topic_id))
             parent = draft if all_messages else None
             # 回答被替换后只能使用新的可见消息重建正文；旧评审项仍要逐项复核。
             if previous and issues and (not replaced or previous.input_version == session.input_version):
                 parent = previous
+            if task.kind == TaskKind.CHALLENGE:
+                issues = [self._prior_issue(visible, issue, issue.assignee.value if issue.assignee in NAMABLE_ROLES else "recorder")
+                          for issue in list(session.issues.values())[-12:]
+                          if issue.topic_id == task.topic_id and issue.input_version == task.input_version]
             if task.kind in (TaskKind.SCORING, TaskKind.STANCE):
                 # Older snapshots did not store the tradeoff IDs on scoring tasks.
                 issue_ids = task.issue_ids or tuple(
@@ -295,6 +341,13 @@ class AgentExecution:
         return jobs
 
     @staticmethod
+    def _draft_excerpt(draft) -> list[str]:
+        if draft is None:
+            return []
+        spec = DraftSpec.parse(draft.content)
+        return [f"{req.requirement_id} {req.text}" for req in spec.requirements[:12]]
+
+    @staticmethod
     def _prior_issue(visible, issue, owner) -> PriorIssue:
         closing = visible.get(issue.closed_by_seq or issue.response_seq)
         response = issue.response if issue.response_seq in visible else None
@@ -305,10 +358,13 @@ class AgentExecution:
             refs.append(closing.seq)
         return PriorIssue(issue_id=issue.issue_id, severity="blocking" if issue.severity.value == "blocking" else "advisory",
                           kind=getattr(getattr(issue, "kind", None), "value", "fact"),
-                          target_item="background", description=issue.summary,
+                          target_item="background", description=(
+                              f"仍待验证：{issue.summary}" if issue.status == IssueStatus.DEFERRED else issue.summary
+                          ),
                           owner_role=ROLE_ALIASES.get(owner, owner),
                           closure_condition=issue.closure_condition or issue.summary,
-                          treatment=response.treatment if response else closing.text if closing else None,
+                          treatment=(None if issue.status == IssueStatus.DEFERRED else
+                                     response.treatment if response else closing.text if closing else None),
                           verification=response.verification if response and response.verification.strip() else None,
                           source_seqs=list(dict.fromkeys(refs)))
 
@@ -350,7 +406,8 @@ class AgentExecution:
         return result
 
     @staticmethod
-    def _job(session, messages, idea, role, kind, topic_id, *, task=None, topic=None, allowed_roles=None, draft=None, issues=(), candidates=(), previous_ids=()) -> Job:
+    def _job(session, messages, idea, role, kind, topic_id, *, task=None, topic=None, allowed_roles=None, draft=None,
+             issues=(), candidates=(), previous_ids=(), focus=None, draft_excerpt=()) -> Job:
         task_id = (task.task_id if task else f"{draft.draft_id}:agent:review" if kind == "review"
                    else f"{session.session_id}:agent:agenda:v{session.input_version}")
         snapshot = None
@@ -360,10 +417,18 @@ class AgentExecution:
                                      revision=draft.version, content=spec.to_content(),
                                      source_map={req.requirement_id: list(req.source_seqs) for req in spec.requirements},
                                      analysis=AgentExecution._message_analysis(draft))
+        initial = getattr(session, "initial_draft", None)
+        if kind in {"agenda", "review"} or (initial and initial.input_version != session.input_version):
+            initial = None
         if kind != "agenda":
             cited = {seq for issue in issues for seq in issue.source_seqs}
+            if task and task.focus_seq is not None:
+                cited.add(task.focus_seq)
+                cited.update(m.reply_to_seq for m in messages if m.seq == task.focus_seq and m.reply_to_seq is not None)
             if snapshot:
                 cited.update(seq for seqs in snapshot.source_map.values() for seq in seqs)
+            if initial:
+                cited.update(initial.source_seqs)
             messages = AgentExecution._select_context(session, messages, kind, topic_id, task, cited)
         visible = {m.seq for m in messages}
         request = RoleRequest(
@@ -381,6 +446,8 @@ class AgentExecution:
                               analysis=AgentExecution._message_analysis(m))
                 for m in messages
             ], draft=snapshot,
+            initial_outline=encode(initial.content) if initial else None,
+            focus=focus, draft_excerpt=list(draft_excerpt),
             issues=[issue.model_copy(update={"source_seqs": [seq for seq in issue.source_seqs if seq in visible]}) for issue in issues],
             **({"allowed_roles": [ROLE_ALIASES.get(r.value, r.value) for r in allowed_roles]}
                if allowed_roles is not None else {}),
@@ -458,6 +525,17 @@ class AgentExecution:
                        "title": request.user_input.splitlines()[0][:80],
                        "question": "首版应该解决哪些用户需求与关键约束？"}],
                        "missing_facts": output["questions"], "question_options": output.get("question_options", {})}
+            if output["action"] == "DISCUSS":
+                payload["items"][0]["required_roles"] = [
+                    ENGINE_ROLES.get(role, role) for role in output["target_roles"]
+                ]
+            if output.get("initial_outline") is not None:
+                payload.update(initial_outline=output["initial_outline"], outline_source_seqs=output["source_seqs"])
+            elif output["action"] == "DISCUSS":
+                notice = "本次未生成初始设计框架，已按当前议题继续讨论。"
+                payload["summary"] += f"\n\n{notice}"
+                if payload["plain_summary"]:
+                    payload["plain_summary"] += f"\n\n{notice}"
             action = "submit_agenda"
         else:
             payload = {"task_id": task.task_id, "session_id": task.session_id, "role": job.role, "kind": job.kind,
@@ -467,11 +545,13 @@ class AgentExecution:
             for key in ("basis", "verification", "agreements", "alternatives", "disagreements", "assumptions", "risks", "plain_summary"):
                 if key in output:
                     payload[key] = output[key]
-            if task.kind == TaskKind.CHALLENGE:
+            if task.kind in (TaskKind.STATEMENT, TaskKind.CHALLENGE):
                 prefix = f"I-{task.round_no}-{task.task_id.rsplit(':', 1)[-1]}"
                 payload["no_new_issues"] = output.get("no_new_issues", False)
                 objections = output.get("objections") or []
-                if not objections and not payload["no_new_issues"]:
+                if task.kind == TaskKind.STATEMENT:
+                    payload["disposition"] = output.get("disposition", "suggestion")
+                elif not objections and not payload["no_new_issues"]:
                     objections = [{
                         "description": output["text"], "owner_role": output["target_roles"][0],
                         "source_seqs": output["source_seqs"], "verification": output["verification"],
@@ -479,7 +559,7 @@ class AgentExecution:
                     }]
                 payload["raised_issues"] = [
                     {"issue_id": f"{prefix}-{index}" if output.get("objections") else prefix,
-                     "topic_id": task.topic_id, "raised_by": job.role, "severity": "major",
+                     "topic_id": task.topic_id, "raised_by": job.role, "severity": item.get("severity", "major"),
                      "kind": item["divergence"], "user_question": item["user_question"],
                      "summary": item["description"], "source_seqs": item["source_seqs"],
                      "assignee": ENGINE_ROLES.get(item["owner_role"], item["owner_role"]),
@@ -542,7 +622,9 @@ class AgentExecution:
                         and session.current_draft is not None and session.current_draft.draft_id == output["draft_id"])
             if task is None:
                 return session.status == SessionStatus.CLARIFYING and session.waiting_for == WaitingFor.HOST_AGENDA
-            return session.status == SessionStatus.DISCUSSING and session.tasks.get(task.task_id) == task
+            return (session.tasks.get(task.task_id) == task
+                    and (session.status == SessionStatus.DISCUSSING
+                         or task.focus_seq is not None and session.status == SessionStatus.AWAITING_CONFIRMATION))
 
         return AgentExecution._commit(service, request.session_id, action, payload, is_current, owner=owner)
 

@@ -152,6 +152,7 @@ class IssueStatus(str, Enum):
     ANSWERED = "answered"
     USER_DECIDED = "user_decided"
     CLOSED = "closed"
+    DEFERRED = "deferred"
 
 
 class Verdict(str, Enum):
@@ -171,6 +172,7 @@ class HostAction(str, Enum):
     SUBMIT_DRAFT = "submit_draft"
     NEXT_TOPIC = "next_topic"
     DECIDE_ROUTINE = "decide_routine"
+    DEFER_ISSUES = "defer_issues"
 
 
 class WaitingFor(str, Enum):

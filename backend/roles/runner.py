@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import math
+from datetime import datetime, timezone
 from time import perf_counter
 from typing import Literal, Protocol
 
@@ -24,6 +25,8 @@ class Attempt(BaseModel):
     usage: dict[str, int | None] | None
     error: str | None
     diagnostic: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class RoleResult(BaseModel):
@@ -100,6 +103,7 @@ class RoleRunner:
                     result.error = "call_limit"
                     break
                 self.calls_used += 1
+                started_at = datetime.now(timezone.utc)
                 start = perf_counter()
                 usage = None
                 error = None
@@ -116,7 +120,9 @@ class RoleRunner:
                         response = await self.provider.complete(request, prompt)
                     usage = response.usage
                     try:
-                        output = validate_output(request, response.content)
+                        output = validate_output(request, response.content, allow_missing_agenda_outline=(
+                            request.kind == "agenda" and number == self.MAX_ATTEMPTS
+                        ))
                         result.output = output.model_dump(mode="json")
                     except ValidationError as exc:
                         error = "invalid_output"
@@ -160,8 +166,11 @@ class RoleRunner:
                     status = "succeeded" if error is None else "failed"
                     if error == "cancelled":
                         status = "cancelled"
-                    result.attempts.append(Attempt(attempt_no=number, status=status, elapsed_seconds=perf_counter() - start,
-                                                   usage=usage, error=error, diagnostic=diagnostic))
+                    result.attempts.append(Attempt(
+                        attempt_no=number, status=status, elapsed_seconds=perf_counter() - start,
+                        usage=usage, error=error, diagnostic=diagnostic,
+                        started_at=started_at, finished_at=datetime.now(timezone.utc),
+                    ))
                     result.error = error
                 if error == "invalid_output":
                     validation_diagnostic = diagnostic
